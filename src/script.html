@@ -104,6 +104,26 @@
     return String(e && e.message || e || 'エラーが発生しました').replace(/^(Error|Exception):\s*/, '').replace(/^AUTH:/, '');
   }
 
+  // ---------------------------------------------------------------- 表示用データのキャッシュ
+  // タブを切り替えるたびにサーバーへ取りに行くと毎回1〜3秒かかるため、
+  // 読み取り系APIの結果を数分間使い回す。申請・承認などデータが変わる操作の後と、
+  // ヘッダーの「更新」ボタンでキャッシュを捨てて取り直す。
+  var CACHE_TTL_MS = 3 * 60 * 1000;
+  var apiCache = {}; // APIメソッド名 -> { at: 取得時刻, data: 結果 }
+
+  function cachedApi(name) {
+    var hit = apiCache[name];
+    if (hit && (Date.now() - hit.at) < CACHE_TTL_MS) return Promise.resolve(hit.data);
+    return api(name).then(function (res) {
+      apiCache[name] = { at: Date.now(), data: res };
+      return res;
+    });
+  }
+
+  function clearApiCache() {
+    apiCache = {};
+  }
+
   // ---------------------------------------------------------------- メッセージ・処理中表示
   var msgTimer = null;
   function showMsg(text, type) {
@@ -126,6 +146,7 @@
   function clearSession() {
     state.token = '';
     state.user = null;
+    apiCache = {};
     localStorage.removeItem('wfb_token');
   }
 
@@ -160,6 +181,7 @@
     if (!pin) { showError('PINを入力してください。'); return; }
     showBusy(true);
     gsRaw('apiLogin', [memberId, pin]).then(function (res) {
+      clearApiCache();
       state.token = res.token;
       state.user = res.user;
       state.settings = res.settings;
@@ -193,7 +215,7 @@
       '<div class="sub">' + esc((s.schoolName ? s.schoolName + ' / ' : '') + s.nendo + '年度') + '</div></div>' +
       '<div class="spacer"></div>' +
       '<div class="who">' + esc(state.user.name) + '(' + esc(state.user.role) + ')</div>' +
-      '<button data-act="reload" title="表示を更新">更新</button>' +
+      '<button data-act="reload" title="最新の情報を取り直します">更新</button>' +
       '<button data-act="logout">ログアウト</button>' +
       '</div>' +
       '<div class="tabs" id="tabs"></div>' +
@@ -223,7 +245,7 @@
 
   // ---- マイページ ----
   views.mypage = function () {
-    return api('apiGetMyPage').then(function (res) {
+    return cachedApi('apiGetMyPage').then(function (res) {
       state.user = res.user;
       state.settings = res.settings;
       var b = res.balance;
@@ -305,7 +327,7 @@
 
   // ---- 利用申請 ----
   views.usage = function () {
-    return api('apiGetMyPage').then(function (res) {
+    return cachedApi('apiGetMyPage').then(function (res) {
       state.settings = res.settings;
       var b = res.balance;
       var workEnd = toMin(state.settings.workEnd);
@@ -349,6 +371,7 @@
     if (minutes <= 0) { showError('入力された時間帯に勤務時間が含まれていません。'); return; }
     if (!confirm('利用を申請します。\n\n取得日: ' + date + '\n時間帯: ' + start + '〜' + end + '\n利用時間: ' + fmtMin(minutes) + '\n\nよろしいですか?')) return;
     api('apiSubmitUsage', { date: date, start: start, end: end, note: note }).then(function (res) {
+      clearApiCache();
       showInfo('利用を申請しました(' + fmtMin(res.minutes) + ')。管理職の承認をお待ちください。');
       switchView('mypage');
     }).catch(function (e2) { showError(errMsg(e2)); });
@@ -356,7 +379,7 @@
 
   // ---- 付与入力 ----
   views.grant = function () {
-    return api('apiGetGrantTargets').then(function (targets) {
+    return cachedApi('apiGetGrantTargets').then(function (targets) {
       var workEnd = toMin(state.settings.workEnd);
       var html = '<div class="card"><h2>付与入力(超過時間の割り振り)</h2>' +
         '<p class="muted">会議等で発生した勤務超過の時間帯を入力してください。勤務時間(' + esc(state.settings.workStart) + '〜' + esc(state.settings.workEnd) + ')の外の部分が、選んだ全員に同じ分数で付与されます。管理職の承認後に確定します。</p>' +
@@ -410,6 +433,7 @@
     if (minutes <= 0) { showError('入力された時間帯はすべて勤務時間内のため、付与時間が0分になります。'); return; }
     if (!confirm('付与を起案します。\n\n発生日: ' + date + '\n時間帯: ' + start + '〜' + end + '\n付与時間: ' + fmtMin(minutes) + ' × ' + ids.length + '名\n事由: ' + reason + '\n\nよろしいですか?')) return;
     api('apiSubmitGrant', { date: date, start: start, end: end, reason: reason, teacherIds: ids }).then(function (res) {
+      clearApiCache();
       showInfo('付与を起案しました(' + fmtMin(res.minutes) + ' × ' + res.count + '名)。管理職の承認をお待ちください。');
       switchView('mypage');
     }).catch(function (e2) { showError(errMsg(e2)); });
@@ -417,7 +441,7 @@
 
   // ---- 割り振り変更簿(自分) ----
   views.ledger = function () {
-    return api('apiGetMyRecords').then(function (res) {
+    return cachedApi('apiGetMyRecords').then(function (res) {
       state.settings = res.settings;
       var b = res.balance;
       var html = '<div class="card"><h2>割り振り変更簿(' + state.settings.nendo + '年度・' + esc(state.user.name) + ')</h2>' +
@@ -475,7 +499,7 @@
 
   // ---- 日別一覧(自分) ----
   views.daily = function () {
-    return api('apiGetMyRecords').then(function (res) {
+    return cachedApi('apiGetMyRecords').then(function (res) {
       state.settings = res.settings;
       state.myRecords = res;
       $id('content').innerHTML =
@@ -521,7 +545,7 @@
 
   // ---- 管理(管理職のみ) ----
   views.admin = function () {
-    return api('apiAdminGetAll').then(function (res) {
+    return cachedApi('apiAdminGetAll').then(function (res) {
       state.adminData = res;
       state.settings = res.settings;
       var pendG = res.grants.filter(function (g) { return g.status === '承認待ち'; }).length;
@@ -630,6 +654,7 @@
       var text = (action === 'approve' ? '承認' : '却下') + ': ' + res.done.length + '件 完了';
       if (res.errors.length) text += '\n' + res.errors.map(function (e) { return e.message; }).join('\n');
       (res.errors.length ? showError : showInfo)(text);
+      clearApiCache();
       refreshAdmin();
     }).catch(function (e) { showError(errMsg(e)); });
   }
@@ -732,6 +757,7 @@
         return;
       }
       showInfo(res.message);
+      clearApiCache();
       refreshAdmin();
     }).catch(function (e) { showError(errMsg(e)); });
   }
@@ -786,6 +812,7 @@
     api('apiAdminSaveMember', payload).then(function (res) {
       showInfo('保存しました(' + res.id + ')。');
       state.editingMember = null;
+      clearApiCache();
       refreshAdmin();
     }).catch(function (e) { showError(errMsg(e)); });
   }
@@ -831,6 +858,7 @@
       state.settings.nendo = res.newNendo;
       state.settings.carryExpired = false;
       state.settings.expireDate = '';
+      clearApiCache();
       renderApp();
       switchView('admin');
     }).catch(function (e) { showError(errMsg(e)); });
@@ -844,6 +872,7 @@
         ? res.affected.map(function (a) { return a.name + ': ' + fmtMin(a.minutes); }).join('\n')
         : '(繰越残が残っている人はいませんでした)';
       alert('前年度繰越分を失効させました(' + res.date + ')。\n\n【失効した残り時間】\n' + lines);
+      clearApiCache();
       refreshAdmin();
     }).catch(function (e) { showError(errMsg(e)); });
   }
@@ -873,6 +902,7 @@
       state.settings = res;
       if (state.adminData) state.adminData.settings = res;
       showInfo('設定を保存しました。');
+      clearApiCache();
       renderApp();
       switchView('admin');
     }).catch(function (e) { showError(errMsg(e)); });
@@ -887,11 +917,12 @@
         clearSession();
         renderLogin();
         break;
-      case 'reload': switchView(state.view); break;
+      case 'reload': clearApiCache(); switchView(state.view); break;
       case 'nav': switchView(ds.view); break;
       case 'withdraw':
         if (confirm('この申請を取り下げます。よろしいですか?')) {
           api('apiWithdraw', ds.kind, ds.id).then(function () {
+            clearApiCache();
             showInfo('取り下げました。');
             switchView('mypage');
           }).catch(function (e) { showError(errMsg(e)); });
@@ -985,10 +1016,8 @@
     gsRaw('apiGetMyPage', [state.token]).then(function (res) {
       state.user = res.user;
       state.settings = res.settings;
+      apiCache['apiGetMyPage'] = { at: Date.now(), data: res }; // 初回表示で取り直さない
       renderApp();
-      state.view = 'mypage';
-      renderTabs();
-      // 取得済みデータの再利用はせず、描画処理を一本化するため改めて表示する
       switchView('mypage');
     }).catch(function () {
       clearSession();
