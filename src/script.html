@@ -766,7 +766,7 @@
   adminSubs.roster = function (el, data) {
     var m = state.editingMember;
     var html = '<div class="card"><h2>名簿管理</h2>' +
-      '<p class="muted small">PINは本人確認用の暗証番号です。教職員は自分のマイページからPINを変更できます。繰越時間は年次更新で自動計算されます(修正が必要なときはスプレッドシートの「名簿」シートを直接編集してください)。</p>' +
+      '<p class="muted small">PINは暗号化して保存され、画面にもスプレッドシートにも表示されません。新規追加時は初期PINが自動発行されます。忘れた人には「PIN初期化」で新しいPINを発行して伝えてください。繰越時間は年次更新で自動計算されます(修正が必要なときはスプレッドシートの「名簿」シートを直接編集してください)。</p>' +
       '<button class="btn sm" data-act="m-new" style="margin-bottom:10px">+ 新しい教職員を追加</button>';
 
     if (m) {
@@ -776,12 +776,12 @@
         '<label class="fld"><span class="cap">役職</span><select id="m-role">' +
         ['教員', '主任', '管理職'].map(function (r) { return '<option' + (m.role === r ? ' selected' : '') + '>' + r + '</option>'; }).join('') +
         '</select></label>' +
-        '<label class="fld"><span class="cap">PIN(数字4〜8桁。空欄の間はログイン不可)</span><input type="text" id="m-pin" value="' + esc(m.pin || '') + '" inputmode="numeric"></label>' +
         '<label class="fld"><span class="cap">メールアドレス(任意。登録すると通知メールが届く)</span><input type="text" id="m-email" value="' + esc(m.email || '') + '"></label>' +
         '<label class="fld"><span class="cap">状態(転出した人は「停止」に)</span><select id="m-status">' +
         ['在籍', '停止'].map(function (s) { return '<option' + ((m.status || '在籍') === s ? ' selected' : '') + '>' + s + '</option>'; }).join('') +
         '</select></label>' +
         '<label class="fld"><span class="cap">備考(任意)</span><input type="text" id="m-note" value="' + esc(m.note || '') + '"></label>' +
+        (m.id ? '<p class="muted small">PINを変えたい場合は、一覧の「PIN初期化」を使ってください。</p>' : '<p class="muted small">保存すると初期PINが自動発行され、一度だけ表示されます。</p>') +
         '<button class="btn" data-act="m-save" data-id="' + esc(m.id || '') + '">保存</button> ' +
         '<button class="btn secondary" data-act="m-cancel-edit">キャンセル</button>' +
         '</div>';
@@ -792,7 +792,9 @@
       data.roster.map(function (r) {
         return '<tr class="' + (r.status !== '在籍' ? 'inactive' : '') + '">' +
           '<td>' + esc(r.id) + '</td><td>' + esc(r.name) + '</td><td>' + esc(r.role) + '</td>' +
-          '<td>' + esc(r.pin || '(未設定)') + '</td><td>' + esc(r.email || '-') + '</td><td>' + esc(r.status) + '</td>' +
+          '<td>' + (r.pinSet ? '設定済み' : '<span class="danger-text">未設定</span>') +
+          ' <button class="btn sm secondary" data-act="m-resetpin" data-id="' + esc(r.id) + '" data-name="' + esc(r.name) + '">初期化</button></td>' +
+          '<td>' + esc(r.email || '-') + '</td><td>' + esc(r.status) + '</td>' +
           '<td class="num">' + r.carryMin + '</td><td class="small">' + esc(r.note) + '</td>' +
           '<td><button class="btn sm secondary" data-act="m-edit" data-id="' + esc(r.id) + '">編集</button></td></tr>';
       }).join('') + '</table></div></div>';
@@ -804,14 +806,26 @@
       id: id || '',
       name: $id('m-name').value,
       role: $id('m-role').value,
-      pin: $id('m-pin').value,
       email: $id('m-email').value,
       status: $id('m-status').value,
       note: $id('m-note').value,
     };
     api('apiAdminSaveMember', payload).then(function (res) {
-      showInfo('保存しました(' + res.id + ')。');
+      if (res.initialPin) {
+        alert('登録しました(' + res.id + ')。\n\n初期PIN: ' + res.initialPin + '\n\n本人に伝えてください。この画面を閉じると再表示できません(忘れた場合は「PIN初期化」で再発行できます)。');
+      } else {
+        showInfo('保存しました(' + res.id + ')。');
+      }
       state.editingMember = null;
+      clearApiCache();
+      refreshAdmin();
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  function resetPin(id, name) {
+    if (!confirm((name || id) + ' さんのPINを初期化します。現在のPINは使えなくなります。よろしいですか?')) return;
+    api('apiAdminResetPin', id).then(function (res) {
+      alert(res.name + ' さんの新しいPIN: ' + res.pin + '\n\n本人に伝えてください。この画面を閉じると再表示できません(必要なら再度初期化してください)。');
       clearApiCache();
       refreshAdmin();
     }).catch(function (e) { showError(errMsg(e)); });
@@ -960,6 +974,7 @@
       }
       case 'm-cancel-edit': state.editingMember = null; renderAdminSubFromCache(); break;
       case 'm-save': saveMember(ds.id); break;
+      case 'm-resetpin': resetPin(ds.id, ds.name); break;
       case 'ys-run': runYearSwitch(); break;
       case 'exp-run': runExpire(); break;
       case 's-save': saveSettings(); break;
@@ -1000,6 +1015,7 @@
       ids: b.getAttribute('data-ids'),
       action: b.getAttribute('data-action'),
       sub: b.getAttribute('data-sub'),
+      name: b.getAttribute('data-name'),
     });
   });
   document.getElementById('app').addEventListener('change', function (ev) {

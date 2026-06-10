@@ -283,9 +283,9 @@ function apiLogin(memberId, pin) {
     throw new Error('PINの誤入力が続いたため、しばらくログインできません。5分ほど待ってからやり直してください。');
   }
   if (!member.pin) {
-    throw new Error('PINが設定されていません。管理者にPINの設定を依頼してください。');
+    throw new Error('PINが設定されていません。管理者にPINの初期化を依頼してください。');
   }
-  if (String(pin == null ? '' : pin).trim() !== member.pin) {
+  if (!verifyPin_(member, pin)) {
     cache.put(failKey, String(fails + 1), PIN_FAIL_LOCK_SECONDS);
     throw new Error('PINが正しくありません。');
   }
@@ -325,17 +325,72 @@ function requireAdmin_(member) {
   if (member.role !== ROLE_ADMIN) throw new Error('この操作は管理職のみ行えます。');
 }
 
+// ---------------------------------------------------------------- PINの保護
+// PINは平文では保存せず、ソルト付きSHA-256ハッシュ(「#」+64桁の16進数)で
+// 名簿シートに保存する。誰も(管理職も)PINそのものを見ることはできない。
+// 名簿シートにPINを平文で直接書いた場合も動作し、次回ログイン成功時に
+// 自動でハッシュへ置き換えられる(復旧用の裏口を兼ねる)。
+
+/** ハッシュ計算用の秘密値。初回利用時に自動生成され、スクリプトプロパティに保存される */
+function pinSecret_() {
+  const props = PropertiesService.getScriptProperties();
+  let secret = props.getProperty('PIN_SECRET');
+  if (!secret) {
+    secret = Utilities.getUuid() + Utilities.getUuid();
+    props.setProperty('PIN_SECRET', secret);
+  }
+  return secret;
+}
+
+function isHashedPin_(value) {
+  return /^#[0-9a-f]{64}$/.test(String(value == null ? '' : value).trim());
+}
+
+function hashPin_(memberId, pin) {
+  const bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    memberId + ':' + String(pin) + ':' + pinSecret_(),
+    Utilities.Charset.UTF_8
+  );
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const b = (bytes[i] + 256) % 256;
+    hex += (b < 16 ? '0' : '') + b.toString(16);
+  }
+  return '#' + hex;
+}
+
+/** 保存形式(ハッシュ/平文)を問わずPINを照合する。平文だった場合は成功時にハッシュへ移行する */
+function verifyPin_(member, pin) {
+  const input = String(pin == null ? '' : pin).trim();
+  if (!member.pin || !input) return false;
+  if (isHashedPin_(member.pin)) {
+    return hashPin_(member.id, input) === member.pin;
+  }
+  if (input !== member.pin) return false;
+  storePin_(member, input); // 旧形式(平文)からの自動移行
+  return true;
+}
+
+/** PINをハッシュ化して名簿シートへ保存する */
+function storePin_(member, pin) {
+  sheet_(SHEET_NAMES.ROSTER).getRange(member.rowIndex, ROSTER_COL.pin + 1).setValue(hashPin_(member.id, pin));
+}
+
+/** 配布用のランダムな6桁PINを作る */
+function randomPin_() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
 function apiChangePin(token, oldPin, newPin) {
   const user = requireUser_(token);
-  if (String(oldPin == null ? '' : oldPin).trim() !== user.pin) {
+  if (!verifyPin_(user, oldPin)) {
     throw new Error('現在のPINが正しくありません。');
   }
   const np = String(newPin == null ? '' : newPin).trim();
   if (!/^\d{4,8}$/.test(np)) throw new Error('新しいPINは4〜8桁の数字で入力してください。');
   withLock_(function () {
-    updateCells_(SHEET_NAMES.ROSTER, user.rowIndex, (function () {
-      const p = {}; p[ROSTER_COL.pin] = np; return p;
-    })());
+    storePin_(user, np);
   });
   return true;
 }

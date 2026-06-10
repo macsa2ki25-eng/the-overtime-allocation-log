@@ -35,7 +35,7 @@ function initialSetup() {
   rosterSheet.getRange('A:F').setNumberFormat('@'); // PINの先頭の0などが消えないようにする
   if (rosterSheet.getLastRow() === 1) {
     rosterSheet.getRange(2, 1, 2, 8).setValues([
-      ['T001', '管理者(氏名に書き換えてください)', ROLE_ADMIN, '0000', '', MEMBER_ACTIVE, 0, '最初のログイン用。氏名とPINを必ず変更してください'],
+      ['T001', '管理者(氏名に書き換えてください)', ROLE_ADMIN, '0000', '', MEMBER_ACTIVE, 0, '最初のログイン用(PIN: 0000)。ログイン後にPINを必ず変更してください。PINは初回ログイン時に自動で暗号化されます'],
       ['T002', '記入例(この行は削除可)', ROLE_TEACHER, '1234', '', MEMBER_INACTIVE, 0, '状態が「停止」の行はログインできません'],
     ]);
   }

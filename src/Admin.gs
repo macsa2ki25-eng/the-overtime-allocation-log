@@ -34,7 +34,8 @@ function apiAdminGetAll(token) {
   return {
     settings: publicSettings_(settings),
     roster: roster.map(function (m) {
-      return { id: m.id, name: m.name, role: m.role, pin: m.pin, email: m.email, status: m.status, carryMin: m.carryMin, note: m.note };
+      // PINそのもの(ハッシュ含む)はクライアントへ送らない。設定済みかどうかだけ返す
+      return { id: m.id, name: m.name, role: m.role, pinSet: !!m.pin, email: m.email, status: m.status, carryMin: m.carryMin, note: m.note };
     }),
     overview: overview,
     grants: grants,
@@ -211,7 +212,9 @@ function apiAdminCancel(token, kind, id, force) {
 
 /**
  * 名簿の登録・更新(管理職のみ)。id が空なら新規追加。
- * 繰越時間はここでは変更しない(年次更新で自動計算される)。
+ * 新規追加時は初期PINを自動生成し、一度だけ返す(保存されるのはハッシュのみ)。
+ * 既存メンバーの編集ではPINを変更しない(変更は本人のPIN変更か apiAdminResetPin で行う)。
+ * 繰越時間もここでは変更しない(年次更新で自動計算される)。
  */
 function apiAdminSaveMember(token, memberData) {
   const user = requireUser_(token);
@@ -221,8 +224,6 @@ function apiAdminSaveMember(token, memberData) {
   if (!name) throw new Error('氏名を入力してください。');
   const role = String(data.role == null ? '' : data.role).trim();
   if ([ROLE_ADMIN, ROLE_LEADER, ROLE_TEACHER].indexOf(role) < 0) throw new Error('役職の指定が正しくありません。');
-  const pin = String(data.pin == null ? '' : data.pin).trim();
-  if (pin && !/^\d{4,8}$/.test(pin)) throw new Error('PINは4〜8桁の数字で入力してください。');
   const email = String(data.email == null ? '' : data.email).trim();
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('メールアドレスの形式が正しくありません。');
   const status = String(data.status == null ? MEMBER_ACTIVE : data.status).trim();
@@ -237,13 +238,31 @@ function apiAdminSaveMember(token, memberData) {
       if (member.id === user.id && (role !== ROLE_ADMIN || status !== MEMBER_ACTIVE)) {
         throw new Error('誤操作防止のため、自分自身の役職変更・停止はできません。別の管理職アカウントから操作してください。');
       }
-      sh.getRange(member.rowIndex, ROSTER_COL.name + 1, 1, 5).setValues([[name, role, pin, email, status]]);
+      sh.getRange(member.rowIndex, ROSTER_COL.name + 1, 1, 5).setValues([[name, role, member.pin, email, status]]);
       sh.getRange(member.rowIndex, ROSTER_COL.note + 1).setValue(note);
       return { id: member.id };
     }
     const id = nextIds_(SHEET_NAMES.ROSTER, ROSTER_COL.id, 'T', 3, 1)[0];
-    appendRows_(SHEET_NAMES.ROSTER, [[id, name, role, pin, email, status, 0, note]]);
-    return { id: id };
+    const initialPin = randomPin_();
+    appendRows_(SHEET_NAMES.ROSTER, [[id, name, role, hashPin_(id, initialPin), email, status, 0, note]]);
+    return { id: id, initialPin: initialPin };
+  });
+}
+
+/**
+ * PINの初期化(管理職のみ)。新しい6桁のPINを自動生成して一度だけ返す。
+ * PINはハッシュ化して保存されるため、この応答以外でPINを確認する方法はない。
+ */
+function apiAdminResetPin(token, memberId) {
+  const user = requireUser_(token);
+  requireAdmin_(user);
+  return withLock_(function () {
+    const member = findMember_(String(memberId == null ? '' : memberId).trim());
+    if (!member) throw new Error('対象が見つかりません。');
+    const pin = randomPin_();
+    storePin_(member, pin);
+    CacheService.getScriptCache().remove('fail_' + member.id); // 誤入力ロックも解除する
+    return { id: member.id, name: member.name, pin: pin };
   });
 }
 
