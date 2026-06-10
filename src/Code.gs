@@ -174,6 +174,25 @@ function nextIds_(sheetName, colIndex, prefix, padLen, count) {
   return ids;
 }
 
+/**
+ * 名簿の新しいIDを発行する。時間や履歴はIDに紐づいているため、
+ * 名簿から行が削除されていても、付与・利用記録に残っているIDとは
+ * 重複しないようにする(別人が過去の記録を引き継ぐ事故の防止)。
+ * 必ず withLock_ の中から呼ぶこと。
+ */
+function nextMemberId_() {
+  const re = /^T(\d+)$/;
+  let max = 0;
+  const consider = function (id) {
+    const m = String(id == null ? '' : id).trim().match(re);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  };
+  getRoster_().forEach(function (m) { consider(m.id); });
+  getGrants_().forEach(function (g) { consider(g.targetId); consider(g.proposerId); });
+  getUsages_().forEach(function (u) { consider(u.memberId); });
+  return 'T' + String(max + 1).padStart(3, '0');
+}
+
 // ---------------------------------------------------------------- 設定
 
 function getSettings_() {

@@ -242,7 +242,7 @@ function apiAdminSaveMember(token, memberData) {
       sh.getRange(member.rowIndex, ROSTER_COL.note + 1).setValue(note);
       return { id: member.id };
     }
-    const id = nextIds_(SHEET_NAMES.ROSTER, ROSTER_COL.id, 'T', 3, 1)[0];
+    const id = nextMemberId_();
     const initialPin = randomPin_();
     appendRows_(SHEET_NAMES.ROSTER, [[id, name, role, hashPin_(id, initialPin), email, status, 0, note]]);
     return { id: id, initialPin: initialPin };
