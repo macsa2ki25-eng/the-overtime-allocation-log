@@ -175,12 +175,12 @@ function nextIds_(sheetName, colIndex, prefix, padLen, count) {
 }
 
 /**
- * 名簿の新しいIDを発行する。時間や履歴はIDに紐づいているため、
+ * 名簿の新しいIDをまとめて発行する。時間や履歴はIDに紐づいているため、
  * 名簿から行が削除されていても、付与・利用記録に残っているIDとは
  * 重複しないようにする(別人が過去の記録を引き継ぐ事故の防止)。
  * 必ず withLock_ の中から呼ぶこと。
  */
-function nextMemberId_() {
+function nextMemberIds_(count) {
   const re = /^T(\d+)$/;
   let max = 0;
   const consider = function (id) {
@@ -190,7 +190,11 @@ function nextMemberId_() {
   getRoster_().forEach(function (m) { consider(m.id); });
   getGrants_().forEach(function (g) { consider(g.targetId); consider(g.proposerId); });
   getUsages_().forEach(function (u) { consider(u.memberId); });
-  return 'T' + String(max + 1).padStart(3, '0');
+  const ids = [];
+  for (let i = 1; i <= count; i++) {
+    ids.push('T' + String(max + i).padStart(3, '0'));
+  }
+  return ids;
 }
 
 // ---------------------------------------------------------------- 設定

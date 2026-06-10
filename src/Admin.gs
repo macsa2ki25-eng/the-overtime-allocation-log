@@ -242,7 +242,7 @@ function apiAdminSaveMember(token, memberData) {
       sh.getRange(member.rowIndex, ROSTER_COL.note + 1).setValue(note);
       return { id: member.id };
     }
-    const id = nextMemberId_();
+    const id = nextMemberIds_(1)[0];
     const initialPin = randomPin_();
     appendRows_(SHEET_NAMES.ROSTER, [[id, name, role, hashPin_(id, initialPin), email, status, 0, note]]);
     return { id: id, initialPin: initialPin };
@@ -285,23 +285,57 @@ function apiAdminSaveSettings(token, settingsData) {
 }
 
 /**
- * 年度切替(4月頃に実行)。
- * 1. 承認待ちが残っていれば中止
+ * 年度切替(4月頃に実行。画面の「年次更新」ウィザードから呼ばれる)。
+ * 人事異動(転出者の停止・転入者の追加)も同じ処理の中でまとめて反映する。
+ * 1. 入力内容と承認待ちを検証(問題があれば何も変更せず中止)
  * 2. スプレッドシート全体のバックアップコピーを作成(Driveに保存される)
  * 3. 各自の残時間(繰越残+今年度残)を名簿の「繰越時間」に書き込む
  * 4. 付与記録・利用記録・通知ログを全消去し、年度を+1、失効日をリセット
+ * 5. 転出者を「停止」にし、転入者を追加(初期PINを発行して一度だけ返す)
  */
-function apiAdminYearSwitch(token, confirmText) {
+function apiAdminYearSwitch(token, confirmText, personnel) {
   const user = requireUser_(token);
   requireAdmin_(user);
   if (String(confirmText == null ? '' : confirmText).trim() !== '年度切替') {
     throw new Error('確認のため、入力欄に「年度切替」と入力してください。');
   }
+  const p = personnel || {};
+  const deactivateIds = (Array.isArray(p.deactivateIds) ? p.deactivateIds : [])
+    .map(function (v) { return String(v == null ? '' : v).trim(); })
+    .filter(function (v) { return v !== ''; });
+  const newMembers = (Array.isArray(p.newMembers) ? p.newMembers : []).map(function (m) {
+    return {
+      name: String(m && m.name != null ? m.name : '').trim(),
+      role: String(m && m.role != null ? m.role : '').trim(),
+      email: String(m && m.email != null ? m.email : '').trim(),
+    };
+  }).filter(function (m) { return m.name !== '' || m.email !== ''; });
+  if (deactivateIds.indexOf(user.id) >= 0) {
+    throw new Error('自分自身を転出(停止)にすることはできません。');
+  }
+  if (newMembers.length > 200) throw new Error('一度に追加できる転入者は200名までです。');
+  newMembers.forEach(function (m, i) {
+    if (!m.name) throw new Error('転入者の' + (i + 1) + '人目: 氏名を入力してください。');
+    if ([ROLE_ADMIN, ROLE_LEADER, ROLE_TEACHER].indexOf(m.role) < 0) {
+      throw new Error('転入者「' + m.name + '」: 役職の指定が正しくありません。');
+    }
+    if (m.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(m.email)) {
+      throw new Error('転入者「' + m.name + '」: メールアドレスの形式が正しくありません。');
+    }
+  });
+
   return withLock_(function () {
     const settings = getSettings_();
     const roster = getRoster_();
     const grants = getGrants_();
     const usages = getUsages_();
+
+    // ここまでで全部の検証を済ませる(途中で失敗して中途半端に変わるのを防ぐ)
+    const byId = {};
+    roster.forEach(function (m) { byId[m.id] = m; });
+    deactivateIds.forEach(function (id) {
+      if (!byId[id]) throw new Error('転出者(' + id + ')が名簿に見つかりません。');
+    });
     const pendingGrants = grants.filter(function (g) { return g.status === STATUS.PENDING; }).length;
     const pendingUsages = usages.filter(function (u) { return u.status === STATUS.PENDING; }).length;
     if (pendingGrants + pendingUsages > 0) {
@@ -309,25 +343,52 @@ function apiAdminYearSwitch(token, confirmText) {
     }
     const balMap = computeBalanceMap_(settings, roster, grants, usages);
 
+    // バックアップ
     const backupName = '【バックアップ】割り振り変更簿_' + settings.nendo + '年度_' + Utilities.formatDate(new Date(), tz_(), 'yyyyMMdd_HHmmss');
     SpreadsheetApp.getActiveSpreadsheet().copy(backupName);
 
+    // 残り時間を新年度の繰越として名簿へ書き込み
     const sh = sheet_(SHEET_NAMES.ROSTER);
     const carried = [];
     roster.forEach(function (m) {
       const b = balMap[m.id];
       const carry = b ? Math.max(b.totalRemain, 0) : 0;
       sh.getRange(m.rowIndex, ROSTER_COL.carry + 1).setValue(carry);
-      if (m.status === MEMBER_ACTIVE) carried.push({ name: m.name, minutes: carry });
+      if (m.status === MEMBER_ACTIVE && deactivateIds.indexOf(m.id) < 0) {
+        carried.push({ name: m.name, minutes: carry });
+      }
     });
 
+    // 記録のリセットと年度の更新
     clearDataRows_(SHEET_NAMES.GRANT);
     clearDataRows_(SHEET_NAMES.USAGE);
     clearDataRows_(SHEET_NAMES.LOG);
     saveSettingValue_(SETTING_KEYS.nendo, settings.nendo + 1);
     saveSettingValue_(SETTING_KEYS.expireDate, '');
 
-    return { backupName: backupName, newNendo: settings.nendo + 1, carried: carried };
+    // 人事異動: 転出者を停止に
+    const deactivated = [];
+    deactivateIds.forEach(function (id) {
+      const member = byId[id];
+      if (member.status === MEMBER_ACTIVE) {
+        sh.getRange(member.rowIndex, ROSTER_COL.status + 1).setValue(MEMBER_INACTIVE);
+        deactivated.push({ id: member.id, name: member.name });
+      }
+    });
+
+    // 人事異動: 転入者を追加(初期PINを発行)
+    const added = [];
+    if (newMembers.length) {
+      const ids = nextMemberIds_(newMembers.length);
+      const rows = newMembers.map(function (m, i) {
+        const pin = randomPin_();
+        added.push({ id: ids[i], name: m.name, role: m.role, initialPin: pin });
+        return [ids[i], m.name, m.role, hashPin_(ids[i], pin), m.email, MEMBER_ACTIVE, 0, ''];
+      });
+      appendRows_(SHEET_NAMES.ROSTER, rows);
+    }
+
+    return { backupName: backupName, newNendo: settings.nendo + 1, carried: carried, deactivated: deactivated, added: added };
   });
 }
 

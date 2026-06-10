@@ -12,6 +12,7 @@
     adminData: null,   // 管理タブ用のキャッシュ
     adminFilter: { kind: '', status: '', member: '' },
     editingMember: null,
+    wizard: null, // 年次更新ウィザードの進行状態
   };
 
   var STATUS_CHIP = {
@@ -831,63 +832,257 @@
     }).catch(function (e) { showError(errMsg(e)); });
   }
 
-  // 年次更新
+  // ---- 年次更新(ウィザード形式・一本道) ----
+  // state.wizard が null のときは入口画面、それ以外は step に応じた画面を表示する。
   adminSubs.year = function (el, data) {
-    var s = data.settings;
-    el.innerHTML =
-      '<div class="card"><h2>年次更新</h2>' +
-      '<p>現在: <b>' + s.nendo + '年度</b> / 前年度繰越分: ' +
-      (s.carryExpired ? '<b class="danger-text">失効済み(' + esc(s.expireDate) + ')</b>' : '<b>有効</b>') + '</p>' +
-      '<p class="muted small">年次更新は2段階です。順番と時期に注意してください。</p>' +
-
-      '<div class="card" style="background:#f8fafc"><h3>① 年度切替(4月頃に実行)</h3>' +
-      '<p class="muted">実行すると次の処理が行われます:</p>' +
-      '<ul class="muted small"><li>スプレッドシート全体のバックアップコピーを作成(Googleドライブに保存)</li>' +
-      '<li>各自の残り時間(繰越残+今年度残)を新年度の「繰越時間」として名簿に記録</li>' +
-      '<li>付与・利用・通知ログの全データを削除し、年度を ' + s.nendo + ' → ' + (s.nendo + 1) + ' に変更</li></ul>' +
-      '<p class="muted small">実行前に承認待ちをすべて処理してください。実行後に名簿の転出・転入を整理してください。</p>' +
-      '<label class="fld"><span class="cap">確認のため「年度切替」と入力</span><input type="text" id="ys-input"></label>' +
-      '<button class="btn danger" data-act="ys-run">年度切替を実行</button></div>' +
-
-      '<div class="card" style="background:#f8fafc"><h3>② 前年度繰越分の失効(6月頃に実行)</h3>' +
-      '<p class="muted">前年度から繰り越した残り時間を使えなくします。各自の今年度分の残りはそのまま残ります。</p>' +
-      '<label class="fld"><span class="cap">確認のため「失効」と入力</span><input type="text" id="exp-input"></label>' +
-      '<button class="btn danger" data-act="exp-run"' + (s.carryExpired ? ' disabled' : '') + '>繰越分を失効させる</button>' +
-      (s.carryExpired ? '<p class="muted small">すでに失効済みです。誤って実行した場合は「設定」シートの「繰越失効日」セルを空にすると元に戻ります。</p>' : '') +
-      '</div></div>';
+    if (!state.wizard) { renderYearIntro(el, data); return; }
+    var step = state.wizard.step;
+    if (step === 'choose') renderYwChoose(el, data);
+    else if (step === 'check') renderYwCheck(el, data);
+    else if (step === 'personnel') renderYwPersonnel(el, data);
+    else if (step === 'confirm') renderYwConfirm(el, data);
+    else if (step === 'done') renderYwDone(el);
+    else if (step === 'expire') renderYwExpire(el, data);
+    else if (step === 'expdone') renderYwExpDone(el);
   };
 
-  function runYearSwitch() {
-    var text = $id('ys-input').value;
-    if (!confirm('年度切替を実行します。付与・利用の全データが削除されます(バックアップは自動作成されます)。本当によろしいですか?')) return;
-    api('apiAdminYearSwitch', text).then(function (res) {
-      var lines = res.carried.length
-        ? res.carried.map(function (c) { return c.name + ': ' + fmtMin(c.minutes); }).join('\n')
-        : '(在籍者がいません)';
-      alert('年度切替が完了しました。' + res.newNendo + '年度を開始します。\n\n' +
-        'バックアップ(Googleドライブに保存):\n' + res.backupName + '\n\n' +
-        '【新年度への繰越時間】\n' + lines + '\n\n' +
-        '続いて名簿タブで転出者を「停止」にし、転入者を追加してください。');
-      // ヘッダーの年度表示を更新してから管理画面を読み直す
+  function cancelBtn() {
+    return '<button class="btn secondary" data-act="yw-cancel">中止</button>';
+  }
+
+  /** 時期と状態から、今やるべき作業を推定する */
+  function recommendTask(data) {
+    var anyCarry = data.overview.some(function (o) { return o.status === '在籍' && o.carryRemain > 0; });
+    var month = new Date().getMonth() + 1;
+    if (!data.settings.carryExpired && anyCarry && month >= 5 && month <= 12) return 'expire';
+    return 'switch';
+  }
+
+  function renderYearIntro(el, data) {
+    var s = data.settings;
+    el.innerHTML = '<div class="card"><h2>年次更新</h2>' +
+      '<p>現在: <b>' + s.nendo + '年度</b> / 前年度から繰り越した時間: ' +
+      (s.carryExpired ? '<b>失効済み(' + esc(s.expireDate) + ')</b>' : '<b>有効</b>') + '</p>' +
+      '<p class="muted">年次更新は年に2回だけの作業です。下のボタンを押すと、あとは画面の案内に従って進むだけで完了します。途中でデータが変わることはなく、最後の「実行」ボタンを押すまで何度でも戻れます。</p>' +
+      '<ul class="muted small">' +
+      '<li><b>3月末〜4月:</b> 新年度への切り替え(残り時間の繰越と、転出・転入の反映)</li>' +
+      '<li><b>6月頃:</b> 前年度から繰り越した時間の失効</li></ul>' +
+      '<button class="btn" data-act="yw-start">年次更新をスタート</button>' +
+      '<p class="muted small" style="margin-top:10px">年度の途中の転入・転出は、ここではなく「名簿」タブで行ってください。</p>' +
+      '</div>';
+  }
+
+  function renderYwChoose(el, data) {
+    var rec = recommendTask(data);
+    var task = state.wizard.task || rec;
+    var radio = function (val, title, desc) {
+      return '<label style="display:block;border:1px solid #cbd5e1;border-radius:10px;padding:12px;margin-bottom:8px;cursor:pointer;background:#fff">' +
+        '<input type="radio" name="yw-task" value="' + val + '"' + (task === val ? ' checked' : '') + '> <b>' + title + '</b>' +
+        (rec === val ? ' <span class="chip approved">おすすめ(時期から判断)</span>' : '') +
+        '<div class="muted small" style="margin-left:22px;margin-top:4px">' + desc + '</div></label>';
+    };
+    el.innerHTML = '<div class="card"><h2>年次更新: 今日行う作業を選んでください</h2>' +
+      radio('switch', '新年度への切り替え(3月末〜4月に1回)',
+        '今年度(' + data.settings.nendo + '年度)の記録を締めて、' + (data.settings.nendo + 1) + '年度を始めます。全員の残り時間は自動で新年度に繰り越されます。転出・転入の反映もこの中で行います。<br>' +
+        '例: 3月29日に実行 → 残り1時間30分だった先生は、新年度の画面で「前年度繰越の残り 1時間30分」からスタートします。') +
+      radio('expire', '前年度繰越分の失効(6月頃に1回)',
+        '前年度から繰り越した時間のうち、まだ使われていない分を使えなくします。<b>今年度に付与された時間はそのまま残ります。</b><br>' +
+        '例: 6月30日に実行 → 前年度繰越の残り30分は消えますが、今年度分の残り2時間はそのまま使えます。') +
+      '<div style="margin-top:14px"><button class="btn" data-act="yw-choose-next">次へ</button> ' + cancelBtn() + '</div></div>';
+  }
+
+  function renderYwCheck(el, data) {
+    var pendG = data.grants.filter(function (g) { return g.status === '承認待ち'; }).length;
+    var pendU = data.usages.filter(function (u) { return u.status === '承認待ち'; }).length;
+    var ok = pendG + pendU === 0;
+    el.innerHTML = '<div class="card"><h2>新年度への切り替え(1/3): 実行前のチェック</h2>' +
+      (ok
+        ? '<p>✅ 承認待ちの申請はありません。このまま進めます。</p>'
+        : '<p class="danger-text">⚠ 承認待ちの申請が残っています(付与 ' + pendG + ' 件・利用 ' + pendU + ' 件)。先にすべて承認または却下してください。</p>' +
+          '<p><button class="btn sm" data-act="admin-sub" data-sub="pending">承認待ちを処理しに行く</button><br>' +
+          '<span class="muted small">処理が終わって「年次更新」タブに戻ると、この続きから再開できます。</span></p>') +
+      '<h3>実行すると自動で行われること</h3>' +
+      '<ol class="muted">' +
+      '<li>スプレッドシート全体のバックアップを作成(Googleドライブに「【バックアップ】…」という名前で保存されるので、万一間違えても元に戻せます)</li>' +
+      '<li>全員の残り時間を ' + (data.settings.nendo + 1) + '年度の「前年度繰越」として引き継ぎ</li>' +
+      '<li>' + data.settings.nendo + '年度の付与・利用の記録を削除し、年度を ' + data.settings.nendo + ' → ' + (data.settings.nendo + 1) + ' に変更</li></ol>' +
+      '<p class="muted small">例: 山田先生の残りが1時間30分 → 新年度の画面では「前年度繰越の残り 1時間30分」と表示されます。</p>' +
+      '<div style="margin-top:14px">' +
+      '<button class="btn" data-act="yw-go" data-to="personnel"' + (ok ? '' : ' disabled') + '>次へ(人事異動の入力)</button> ' +
+      '<button class="btn secondary" data-act="yw-go" data-to="choose">戻る</button> ' + cancelBtn() +
+      '</div></div>';
+  }
+
+  function iyRowHtml(m, i) {
+    return '<div class="iy-row timerange" style="margin-bottom:6px">' +
+      '<input type="text" class="iy-name" placeholder="氏名" value="' + esc(m.name) + '" style="max-width:170px">' +
+      '<select class="iy-role" style="width:110px">' +
+      ['教員', '主任', '管理職'].map(function (r) { return '<option' + (m.role === r ? ' selected' : '') + '>' + r + '</option>'; }).join('') +
+      '</select>' +
+      '<input type="text" class="iy-email" placeholder="メール(任意)" value="' + esc(m.email) + '" style="max-width:230px">' +
+      '<button class="btn sm secondary" data-act="iy-del-row" data-idx="' + i + '">削除</button>' +
+      '</div>';
+  }
+
+  function renderYwPersonnel(el, data) {
+    var w = state.wizard;
+    if (!w.ins.length) w.ins.push({ name: '', role: '教員', email: '' });
+    var actives = data.roster.filter(function (r) { return r.status === '在籍'; });
+    el.innerHTML = '<div class="card"><h2>新年度への切り替え(2/3): 人事異動の入力</h2>' +
+      '<p class="muted">この春の異動を入力してください。<b>異動がない場合は、何もせずに「次へ」</b>で構いません。あとから「名簿」タブで直すこともできます。</p>' +
+      '<h3>転出する先生(チェックした先生は新年度はログインできなくなります)</h3>' +
+      '<p class="muted small">例: 田中先生が3月末で他校へ異動する → 田中先生にチェック。<br>残っていた時間は記録に残りますが、新年度には使われません。</p>' +
+      '<div class="check-list" id="iy-out">' +
+      actives.map(function (r) {
+        var self = r.id === state.user.id;
+        return '<label' + (self ? ' style="opacity:.55"' : '') + '><input type="checkbox" value="' + esc(r.id) + '"' +
+          (self ? ' disabled' : (w.outs.indexOf(r.id) >= 0 ? ' checked' : '')) + '>' + esc(r.name) + (self ? '(自分)' : '') + '</label>';
+      }).join('') + '</div>' +
+      '<h3>転入してくる先生</h3>' +
+      '<p class="muted small">例: 4月から佐藤花子先生(学年主任)が着任 → 氏名「佐藤花子」・役職「主任」と入力。<br>' +
+      'ログイン用の暗証番号(初期PIN)は実行後に自動で発行され、画面に表示されます。メールは空欄でも構いません(登録すると通知メールが届くようになります)。</p>' +
+      '<div id="iy-in">' + w.ins.map(iyRowHtml).join('') + '</div>' +
+      '<button class="btn sm secondary" data-act="iy-add-row">+ 転入者の行を追加</button>' +
+      '<div style="margin-top:14px">' +
+      '<button class="btn" data-act="yw-personnel-next">次へ(最終確認)</button> ' +
+      '<button class="btn secondary" data-act="yw-go" data-to="check">戻る</button> ' + cancelBtn() +
+      '</div></div>';
+  }
+
+  /** 人事異動ステップの画面上の入力内容を state に保存する(画面の描き直しで消えないように) */
+  function capturePersonnel() {
+    if (!document.getElementById('iy-in')) return;
+    var w = state.wizard;
+    w.outs = Array.prototype.slice.call(document.querySelectorAll('#iy-out input:checked')).map(function (c) { return c.value; });
+    w.ins = Array.prototype.slice.call(document.querySelectorAll('#iy-in .iy-row')).map(function (row) {
+      return {
+        name: row.querySelector('.iy-name').value.trim(),
+        role: row.querySelector('.iy-role').value,
+        email: row.querySelector('.iy-email').value.trim(),
+      };
+    });
+  }
+
+  function ywPersonnelNext() {
+    capturePersonnel();
+    var bad = null;
+    state.wizard.ins.forEach(function (m, i) {
+      if (!m.name && m.email) bad = '転入者の' + (i + 1) + '行目: メールだけ入力されています。氏名を入力するか、行を削除してください。';
+    });
+    if (bad) { showError(bad); return; }
+    state.wizard.step = 'confirm';
+    renderAdminSubFromCache();
+  }
+
+  function renderYwConfirm(el, data) {
+    var w = state.wizard;
+    var ins = w.ins.filter(function (m) { return m.name; });
+    var outNames = w.outs.map(function (id) {
+      var r = data.roster.filter(function (m) { return m.id === id; })[0];
+      return r ? r.name : id;
+    });
+    var stay = data.overview.filter(function (o) { return o.status === '在籍' && w.outs.indexOf(o.id) < 0; });
+    el.innerHTML = '<div class="card"><h2>新年度への切り替え(3/3): 最終確認</h2>' +
+      '<p style="font-size:17px"><b>' + data.settings.nendo + '年度 → ' + (data.settings.nendo + 1) + '年度</b></p>' +
+      '<h3>新年度に繰り越される残り時間</h3>' +
+      '<div class="tbl-wrap"><table class="tbl"><tr><th>氏名</th><th>繰越時間</th></tr>' +
+      stay.map(function (o) { return '<tr><td>' + esc(o.name) + '</td><td class="num">' + fmtMin(Math.max(o.totalRemain, 0)) + '</td></tr>'; }).join('') +
+      '</table></div>' +
+      '<h3>転出(停止): ' + outNames.length + '名</h3>' +
+      '<p>' + (outNames.length ? esc(outNames.join('、')) : 'なし') + '</p>' +
+      '<h3>転入(追加): ' + ins.length + '名</h3>' +
+      '<p>' + (ins.length ? esc(ins.map(function (m) { return m.name + '(' + m.role + ')'; }).join('、')) : 'なし') + '</p>' +
+      '<p class="danger-text"><b>実行すると元に戻せません</b>(直前のバックアップは自動で残ります)。内容が違う場合は「戻る」で直してください。</p>' +
+      '<label class="fld"><span class="cap">確認のため「年度切替」と入力してください</span><input type="text" id="ys-input"></label>' +
+      '<div><button class="btn danger" data-act="yw-exec-switch">年度切替を実行する</button> ' +
+      '<button class="btn secondary" data-act="yw-go" data-to="personnel">戻る</button> ' + cancelBtn() + '</div></div>';
+  }
+
+  function ywExecSwitch() {
+    var w = state.wizard;
+    var ins = w.ins.filter(function (m) { return m.name; });
+    api('apiAdminYearSwitch', $id('ys-input').value, { deactivateIds: w.outs, newMembers: ins }).then(function (res) {
+      w.result = res;
+      w.step = 'done';
       state.settings.nendo = res.newNendo;
       state.settings.carryExpired = false;
       state.settings.expireDate = '';
+      var sub = document.querySelector('.header .sub');
+      if (sub) sub.textContent = (state.settings.schoolName ? state.settings.schoolName + ' / ' : '') + res.newNendo + '年度';
       clearApiCache();
-      renderApp();
-      switchView('admin');
+      renderAdminSubFromCache();
     }).catch(function (e) { showError(errMsg(e)); });
   }
 
-  function runExpire() {
-    var text = $id('exp-input').value;
-    if (!confirm('前年度繰越分を失効させます。よろしいですか?')) return;
-    api('apiAdminExpireCarryover', text).then(function (res) {
-      var lines = res.affected.length
-        ? res.affected.map(function (a) { return a.name + ': ' + fmtMin(a.minutes); }).join('\n')
-        : '(繰越残が残っている人はいませんでした)';
-      alert('前年度繰越分を失効させました(' + res.date + ')。\n\n【失効した残り時間】\n' + lines);
+  function renderYwDone(el) {
+    var r = state.wizard.result;
+    el.innerHTML = '<div class="card"><h2>✅ 年度切替が完了しました(' + r.newNendo + '年度開始)</h2>' +
+      '<p class="muted small">バックアップ: ' + esc(r.backupName) + '(Googleドライブの「マイドライブ」に保存されています)</p>' +
+      (r.deactivated.length ? '<p>転出(停止): ' + esc(r.deactivated.map(function (d) { return d.name; }).join('、')) + '</p>' : '') +
+      (r.added.length
+        ? '<h3>転入した先生の初期PIN</h3>' +
+          '<p class="danger-text"><b>この画面を離れると再表示できません。</b>メモして本人に渡してください(忘れた場合は「名簿」タブの「PIN初期化」で再発行できます)。</p>' +
+          '<div class="tbl-wrap"><table class="tbl"><tr><th>氏名</th><th>役職</th><th>初期PIN</th></tr>' +
+          r.added.map(function (a) { return '<tr><td>' + esc(a.name) + '</td><td>' + esc(a.role) + '</td><td><b>' + esc(a.initialPin) + '</b></td></tr>'; }).join('') +
+          '</table></div>'
+        : '') +
+      '<h3>次の作業</h3>' +
+      '<p class="muted">6月頃にもう一度このタブで「年次更新をスタート」し、「前年度繰越分の失効」を行ってください。それまで年次更新の作業はありません。</p>' +
+      '<div style="margin-top:14px"><button class="btn" data-act="yw-finish">完了(管理画面に戻る)</button></div></div>';
+  }
+
+  function renderYwExpire(el, data) {
+    if (data.settings.carryExpired) {
+      el.innerHTML = '<div class="card"><h2>前年度繰越分の失効</h2>' +
+        '<p>前年度繰越分はすでに失効済みです(' + esc(data.settings.expireDate) + ')。この作業は不要です。</p>' +
+        '<div><button class="btn secondary" data-act="yw-go" data-to="choose">戻る</button> ' + cancelBtn() + '</div></div>';
+      return;
+    }
+    var affected = data.overview.filter(function (o) { return o.status === '在籍' && o.carryRemain > 0; });
+    el.innerHTML = '<div class="card"><h2>前年度繰越分の失効(1/1): 内容の確認</h2>' +
+      '<p class="muted">前年度から繰り越した時間のうち、まだ使われていない分を使えなくします。<b>今年度に付与された時間はそのまま残ります。</b></p>' +
+      '<p class="muted small">例: 山田先生が「前年度繰越の残り30分」と「今年度分の残り2時間」を持っている場合 → 実行後は今年度分の2時間だけになります。</p>' +
+      '<h3>失効する時間</h3>' +
+      (affected.length
+        ? '<div class="tbl-wrap"><table class="tbl"><tr><th>氏名</th><th>失効する時間</th></tr>' +
+          affected.map(function (o) { return '<tr><td>' + esc(o.name) + '</td><td class="num">' + fmtMin(o.carryRemain) + '</td></tr>'; }).join('') + '</table></div>'
+        : '<p>繰越分が残っている先生はいません(全員使い切っています)。実行しても残り時間は変わりません。</p>') +
+      '<p class="muted small">間違えて実行した場合も元に戻せます(運用・引き継ぎマニュアル参照)。</p>' +
+      '<label class="fld"><span class="cap">確認のため「失効」と入力してください</span><input type="text" id="exp-input"></label>' +
+      '<div><button class="btn danger" data-act="yw-exec-expire">失効を実行する</button> ' +
+      '<button class="btn secondary" data-act="yw-go" data-to="choose">戻る</button> ' + cancelBtn() + '</div></div>';
+  }
+
+  function ywExecExpire() {
+    api('apiAdminExpireCarryover', $id('exp-input').value).then(function (res) {
+      state.wizard.result = res;
+      state.wizard.step = 'expdone';
+      state.settings.carryExpired = true;
+      state.settings.expireDate = res.date;
       clearApiCache();
-      refreshAdmin();
+      renderAdminSubFromCache();
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  function renderYwExpDone(el) {
+    var r = state.wizard.result;
+    el.innerHTML = '<div class="card"><h2>✅ 前年度繰越分を失効させました(' + esc(r.date) + ')</h2>' +
+      (r.affected.length
+        ? '<div class="tbl-wrap"><table class="tbl"><tr><th>氏名</th><th>失効した時間</th></tr>' +
+          r.affected.map(function (a) { return '<tr><td>' + esc(a.name) + '</td><td class="num">' + fmtMin(a.minutes) + '</td></tr>'; }).join('') + '</table></div>'
+        : '<p>繰越分が残っている先生はいなかったため、残り時間に変化はありません。</p>') +
+      '<h3>次の作業</h3><p class="muted">次は3月末〜4月の「新年度への切り替え」です。それまで年次更新の作業はありません。</p>' +
+      '<div style="margin-top:14px"><button class="btn" data-act="yw-finish">完了(管理画面に戻る)</button></div></div>';
+  }
+
+  /** ウィザード開始: 最新データを取り直してから始める */
+  function ywStart() {
+    clearApiCache();
+    api('apiAdminGetAll').then(function (d) {
+      state.adminData = d;
+      state.settings = d.settings;
+      state.wizard = { task: null, step: 'choose', outs: [], ins: [], result: null };
+      renderAdminSubFromCache();
     }).catch(function (e) { showError(errMsg(e)); });
   }
 
@@ -975,8 +1170,43 @@
       case 'm-cancel-edit': state.editingMember = null; renderAdminSubFromCache(); break;
       case 'm-save': saveMember(ds.id); break;
       case 'm-resetpin': resetPin(ds.id, ds.name); break;
-      case 'ys-run': runYearSwitch(); break;
-      case 'exp-run': runExpire(); break;
+      case 'yw-start': ywStart(); break;
+      case 'yw-cancel':
+        if (confirm('年次更新を中止しますか?(入力した内容は破棄されますが、データは何も変更されていません)')) {
+          state.wizard = null;
+          renderAdminSubFromCache();
+        }
+        break;
+      case 'yw-go':
+        capturePersonnel();
+        state.wizard.step = ds.to;
+        renderAdminSubFromCache();
+        break;
+      case 'yw-choose-next': {
+        var sel = document.querySelector('input[name="yw-task"]:checked');
+        state.wizard.task = sel ? sel.value : 'switch';
+        state.wizard.step = state.wizard.task === 'switch' ? 'check' : 'expire';
+        renderAdminSubFromCache();
+        break;
+      }
+      case 'yw-personnel-next': ywPersonnelNext(); break;
+      case 'iy-add-row':
+        capturePersonnel();
+        state.wizard.ins.push({ name: '', role: '教員', email: '' });
+        renderAdminSubFromCache();
+        break;
+      case 'iy-del-row':
+        capturePersonnel();
+        state.wizard.ins.splice(parseInt(ds.idx, 10), 1);
+        renderAdminSubFromCache();
+        break;
+      case 'yw-exec-switch': ywExecSwitch(); break;
+      case 'yw-exec-expire': ywExecExpire(); break;
+      case 'yw-finish':
+        state.wizard = null;
+        clearApiCache();
+        refreshAdmin();
+        break;
       case 's-save': saveSettings(); break;
     }
   }
@@ -1016,6 +1246,8 @@
       action: b.getAttribute('data-action'),
       sub: b.getAttribute('data-sub'),
       name: b.getAttribute('data-name'),
+      to: b.getAttribute('data-to'),
+      idx: b.getAttribute('data-idx'),
     });
   });
   document.getElementById('app').addEventListener('change', function (ev) {
