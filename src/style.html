@@ -1,0 +1,256 @@
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+    background: #f1f3f6;
+    color: #1f2937;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .boot { padding: 40px; text-align: center; color: #6b7280; }
+
+  /* ヘッダー */
+  .header {
+    background: #1e3a8a;
+    color: #fff;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .header .title { font-weight: bold; font-size: 17px; }
+  .header .sub { font-size: 12px; opacity: .85; }
+  .header .spacer { flex: 1; }
+  .header .who { font-size: 13px; }
+  .header button {
+    background: rgba(255,255,255,.15);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,.4);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .header button:hover { background: rgba(255,255,255,.25); }
+
+  /* タブ */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    padding: 8px 12px 0;
+    background: #fff;
+    border-bottom: 1px solid #d1d5db;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .tabs .tab {
+    border: 1px solid #d1d5db;
+    border-bottom: none;
+    background: #f3f4f6;
+    color: #374151;
+    border-radius: 8px 8px 0 0;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .tabs .tab.active { background: #fff; color: #1e3a8a; font-weight: bold; border-color: #9ca3af; }
+
+  /* 共通 */
+  .content { padding: 14px; max-width: 1100px; margin: 0 auto; }
+  .card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 14px;
+    box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  }
+  .card h2 { margin: 0 0 10px; font-size: 16px; color: #1e3a8a; }
+  .card h3 { margin: 14px 0 6px; font-size: 14px; color: #374151; }
+  .muted { color: #6b7280; font-size: 13px; }
+  .small { font-size: 12px; }
+  .danger-text { color: #b91c1c; }
+
+  button.btn {
+    background: #1e40af;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  button.btn:hover { background: #1c3aa0; }
+  button.btn:disabled { background: #9ca3af; cursor: not-allowed; }
+  button.btn.secondary { background: #e5e7eb; color: #1f2937; }
+  button.btn.secondary:hover { background: #d1d5db; }
+  button.btn.danger { background: #b91c1c; }
+  button.btn.danger:hover { background: #991b1b; }
+  button.btn.sm { padding: 4px 10px; font-size: 13px; border-radius: 6px; }
+
+  label.fld { display: block; margin-bottom: 10px; }
+  label.fld span.cap { display: block; font-size: 13px; color: #374151; margin-bottom: 3px; }
+  input[type=text], input[type=password], input[type=date], select, textarea {
+    width: 100%;
+    max-width: 420px;
+    padding: 9px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    font-size: 15px;
+    background: #fff;
+  }
+  select.time { width: 130px; display: inline-block; }
+  .timerange { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+  .preview {
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 10px 0;
+    font-size: 14px;
+  }
+  .preview b { font-size: 17px; color: #1e3a8a; }
+
+  /* 残時間カード */
+  .balance-grid { display: flex; gap: 10px; flex-wrap: wrap; }
+  .bal {
+    flex: 1;
+    min-width: 140px;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 12px;
+    text-align: center;
+    background: #f9fafb;
+  }
+  .bal .cap { font-size: 12px; color: #6b7280; }
+  .bal .val { font-size: 22px; font-weight: bold; color: #111827; }
+  .bal.main { background: #eff6ff; border-color: #bfdbfe; }
+  .bal.main .val { color: #1e3a8a; font-size: 26px; }
+  .bal .val.neg { color: #b91c1c; }
+
+  /* テーブル */
+  .tbl-wrap { overflow-x: auto; }
+  table.tbl { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  table.tbl th, table.tbl td {
+    border: 1px solid #e5e7eb;
+    padding: 6px 8px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  table.tbl th { background: #f3f4f6; font-weight: 600; }
+  table.tbl tr.inactive td { color: #9ca3af; background: #fafafa; }
+  table.tbl td.num { text-align: right; }
+
+  /* 状態チップ */
+  .chip {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 1px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .chip.pending { background: #fef3c7; color: #92400e; }
+  .chip.approved { background: #d1fae5; color: #065f46; }
+  .chip.rejected { background: #e5e7eb; color: #4b5563; }
+  .chip.canceled { background: #fee2e2; color: #991b1b; }
+  .chip.withdrawn { background: #e5e7eb; color: #6b7280; }
+
+  /* 日別グループ */
+  .day-group { border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+  .day-group .day-head {
+    background: #f3f4f6;
+    padding: 7px 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .day-group .day-body { padding: 4px 12px 8px; }
+  .day-row { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px dashed #e5e7eb; flex-wrap: wrap; align-items: center; }
+  .day-row:last-child { border-bottom: none; }
+
+  /* 承認待ちグループ */
+  .pend-group { border: 1px solid #fcd34d; border-radius: 10px; margin-bottom: 12px; overflow: hidden; }
+  .pend-group .pg-head { background: #fffbeb; padding: 10px 12px; }
+  .pend-group .pg-body { padding: 8px 12px; }
+  .pend-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px dashed #e5e7eb; flex-wrap: wrap; }
+  .pend-row:last-child { border-bottom: none; }
+  .pend-actions { margin-left: auto; display: flex; gap: 6px; }
+
+  /* 管理サブタブ */
+  .subtabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .subtabs .sub {
+    border: 1px solid #cbd5e1;
+    background: #fff;
+    border-radius: 999px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font-size: 13.5px;
+  }
+  .subtabs .sub.active { background: #1e40af; color: #fff; border-color: #1e40af; }
+
+  /* チェックボックス一覧 */
+  .check-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 4px; margin: 8px 0; }
+  .check-list label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 7px 10px;
+    cursor: pointer;
+    background: #fff;
+  }
+  .check-list label:has(input:checked) { background: #eff6ff; border-color: #93c5fd; }
+
+  /* メッセージバナー */
+  #msg {
+    position: fixed;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    max-width: 90%;
+    border-radius: 10px;
+    padding: 12px 18px;
+    font-size: 14px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.18);
+    display: none;
+    white-space: pre-wrap;
+  }
+  #msg.error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+  #msg.info { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+
+  /* 処理中表示 */
+  #busy {
+    position: fixed;
+    inset: 0;
+    background: rgba(255,255,255,.5);
+    z-index: 90;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    color: #1e3a8a;
+  }
+
+  /* ログイン画面 */
+  .login-wrap { max-width: 420px; margin: 40px auto; padding: 0 14px; }
+  .login-wrap .card { padding: 24px; }
+  .login-title { text-align: center; font-size: 20px; font-weight: bold; color: #1e3a8a; margin-bottom: 4px; }
+  .login-sub { text-align: center; margin-bottom: 18px; }
+
+  details.box { border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 12px; margin-top: 10px; background: #fafafa; }
+  details.box summary { cursor: pointer; font-size: 14px; color: #374151; }
+
+  @media (max-width: 600px) {
+    .content { padding: 10px; }
+    .bal .val { font-size: 18px; }
+    .bal.main .val { font-size: 22px; }
+  }
+</style>

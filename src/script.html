@@ -1,0 +1,1001 @@
+<script>
+(function () {
+  'use strict';
+
+  // ---------------------------------------------------------------- 状態
+  var state = {
+    token: localStorage.getItem('wfb_token') || '',
+    user: null,        // ログイン中の本人情報
+    settings: null,    // 学校名・勤務時間など
+    view: 'mypage',
+    adminSub: 'pending',
+    adminData: null,   // 管理タブ用のキャッシュ
+    adminFilter: { kind: '', status: '', member: '' },
+    editingMember: null,
+  };
+
+  var STATUS_CHIP = {
+    '承認待ち': 'pending',
+    '承認済み': 'approved',
+    '却下': 'rejected',
+    '取消': 'canceled',
+    '取下げ': 'withdrawn',
+  };
+
+  // ---------------------------------------------------------------- 汎用ヘルパー
+  function $id(id) { return document.getElementById(id); }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function toMin(t) {
+    var m = String(t == null ? '' : t).trim().match(/^([0-9]{1,2}):([0-9]{2})$/);
+    if (!m) return null;
+    var h = parseInt(m[1], 10), mi = parseInt(m[2], 10);
+    if (h > 23 || mi > 59) return null;
+    return h * 60 + mi;
+  }
+
+  function toTime(min) {
+    var h = Math.floor(min / 60), m = min % 60;
+    return h + ':' + (m < 10 ? '0' + m : m);
+  }
+
+  function fmtMin(min) {
+    var sign = min < 0 ? '-' : '';
+    var abs = Math.abs(min);
+    var h = Math.floor(abs / 60), m = abs % 60;
+    if (h === 0) return sign + m + '分';
+    if (m === 0) return sign + h + '時間';
+    return sign + h + '時間' + m + '分';
+  }
+
+  function todayStr() {
+    var d = new Date();
+    var mo = d.getMonth() + 1, da = d.getDate();
+    return d.getFullYear() + '-' + (mo < 10 ? '0' + mo : mo) + '-' + (da < 10 ? '0' + da : da);
+  }
+
+  function chip(status) {
+    return '<span class="chip ' + (STATUS_CHIP[status] || 'rejected') + '">' + esc(status) + '</span>';
+  }
+
+  function overlap(aS, aE, bS, bE) { return Math.max(0, Math.min(aE, bE) - Math.max(aS, bS)); }
+
+  /** 5分刻みの時刻セレクト(6:00〜22:00) */
+  function timeSelect(id, selected) {
+    var html = '<select id="' + id + '" class="time" data-watch="preview">';
+    for (var min = 360; min <= 1320; min += 5) {
+      var t = toTime(min);
+      html += '<option value="' + t + '"' + (t === selected ? ' selected' : '') + '>' + t + '</option>';
+    }
+    return html + '</select>';
+  }
+
+  // ---------------------------------------------------------------- 通信
+  function gsRaw(name, args) {
+    return new Promise(function (resolve, reject) {
+      var runner = google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(function (e) { reject(e); });
+      runner[name].apply(runner, args || []);
+    });
+  }
+
+  /** token 付きでサーバーAPIを呼ぶ。セッション切れならログイン画面へ戻す */
+  function api(name) {
+    var rest = Array.prototype.slice.call(arguments, 1);
+    showBusy(true);
+    return gsRaw(name, [state.token].concat(rest))
+      .catch(function (e) {
+        if (String(e && e.message || '').indexOf('AUTH:') >= 0) {
+          clearSession();
+          renderLogin('ログインの有効期限が切れました。もう一度ログインしてください。');
+        }
+        throw e;
+      })
+      .finally(function () { showBusy(false); });
+  }
+
+  function errMsg(e) {
+    return String(e && e.message || e || 'エラーが発生しました').replace(/^(Error|Exception):\s*/, '').replace(/^AUTH:/, '');
+  }
+
+  // ---------------------------------------------------------------- メッセージ・処理中表示
+  var msgTimer = null;
+  function showMsg(text, type) {
+    var el = $id('msg');
+    if (!el) return;
+    el.textContent = text;
+    el.className = type;
+    el.style.display = 'block';
+    clearTimeout(msgTimer);
+    msgTimer = setTimeout(function () { el.style.display = 'none'; }, type === 'error' ? 9000 : 5000);
+  }
+  function showError(text) { showMsg(text, 'error'); }
+  function showInfo(text) { showMsg(text, 'info'); }
+
+  function showBusy(on) {
+    var el = $id('busy');
+    if (el) el.style.display = on ? 'flex' : 'none';
+  }
+
+  function clearSession() {
+    state.token = '';
+    state.user = null;
+    localStorage.removeItem('wfb_token');
+  }
+
+  // ---------------------------------------------------------------- ログイン画面
+  function renderLogin(notice) {
+    state.adminData = null;
+    document.getElementById('app').innerHTML =
+      '<div id="msg"></div><div id="busy">処理中...</div>' +
+      '<div class="login-wrap"><div class="card">' +
+      '<div class="login-title">割り振り変更簿</div>' +
+      '<div class="login-sub muted" id="login-school">読み込み中...</div>' +
+      '<label class="fld"><span class="cap">名前</span><select id="login-member"><option value="">読み込み中...</option></select></label>' +
+      '<label class="fld"><span class="cap">PIN(暗証番号)</span><input type="password" id="login-pin" inputmode="numeric" autocomplete="off" placeholder="数字4〜8桁"></label>' +
+      '<button class="btn" data-act="login" style="width:100%">ログイン</button>' +
+      '<p class="muted small" style="margin-top:14px">名前が一覧にない場合や、PINを忘れた場合は管理職に連絡してください。</p>' +
+      '</div></div>';
+    if (notice) showError(notice);
+
+    gsRaw('apiGetLoginList').then(function (res) {
+      $id('login-school').textContent = (res.schoolName ? res.schoolName + ' ' : '') + res.nendo + '年度';
+      var last = localStorage.getItem('wfb_member') || '';
+      $id('login-member').innerHTML = '<option value="">選択してください</option>' + res.members.map(function (m) {
+        return '<option value="' + esc(m.id) + '"' + (m.id === last ? ' selected' : '') + '>' + esc(m.name) + '</option>';
+      }).join('');
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  function doLogin() {
+    var memberId = $id('login-member').value;
+    var pin = $id('login-pin').value;
+    if (!memberId) { showError('名前を選択してください。'); return; }
+    if (!pin) { showError('PINを入力してください。'); return; }
+    showBusy(true);
+    gsRaw('apiLogin', [memberId, pin]).then(function (res) {
+      state.token = res.token;
+      state.user = res.user;
+      state.settings = res.settings;
+      localStorage.setItem('wfb_token', res.token);
+      localStorage.setItem('wfb_member', memberId);
+      renderApp();
+      switchView('mypage');
+    }).catch(function (e) { showError(errMsg(e)); })
+      .finally(function () { showBusy(false); });
+  }
+
+  // ---------------------------------------------------------------- アプリ全体の枠
+  function tabsForUser() {
+    var tabs = [
+      { id: 'mypage', label: 'マイページ' },
+      { id: 'usage', label: '利用申請' },
+    ];
+    if (state.user.canGrant) tabs.push({ id: 'grant', label: '付与入力' });
+    tabs.push({ id: 'ledger', label: '割り振り変更簿' });
+    tabs.push({ id: 'daily', label: '日別一覧' });
+    if (state.user.isAdmin) tabs.push({ id: 'admin', label: '管理' });
+    return tabs;
+  }
+
+  function renderApp() {
+    var s = state.settings;
+    document.getElementById('app').innerHTML =
+      '<div id="msg"></div><div id="busy">処理中...</div>' +
+      '<div class="header">' +
+      '<div><div class="title">割り振り変更簿</div>' +
+      '<div class="sub">' + esc((s.schoolName ? s.schoolName + ' / ' : '') + s.nendo + '年度') + '</div></div>' +
+      '<div class="spacer"></div>' +
+      '<div class="who">' + esc(state.user.name) + '(' + esc(state.user.role) + ')</div>' +
+      '<button data-act="reload" title="表示を更新">更新</button>' +
+      '<button data-act="logout">ログアウト</button>' +
+      '</div>' +
+      '<div class="tabs" id="tabs"></div>' +
+      '<div class="content" id="content"></div>';
+    renderTabs();
+  }
+
+  function renderTabs() {
+    $id('tabs').innerHTML = tabsForUser().map(function (t) {
+      return '<button class="tab' + (t.id === state.view ? ' active' : '') + '" data-act="nav" data-view="' + t.id + '">' + t.label + '</button>';
+    }).join('');
+  }
+
+  function switchView(view) {
+    state.view = view;
+    renderTabs();
+    var c = $id('content');
+    c.innerHTML = '<div class="boot">読み込み中...</div>';
+    var fn = views[view];
+    if (fn) fn().catch(function (e) {
+      c.innerHTML = '<div class="card"><p class="danger-text">' + esc(errMsg(e)) + '</p></div>';
+    });
+  }
+
+  // ---------------------------------------------------------------- 各画面
+  var views = {};
+
+  // ---- マイページ ----
+  views.mypage = function () {
+    return api('apiGetMyPage').then(function (res) {
+      state.user = res.user;
+      state.settings = res.settings;
+      var b = res.balance;
+      var html = '';
+
+      if (res.adminPending && (res.adminPending.grants + res.adminPending.usages) > 0) {
+        html += '<div class="card" style="border-color:#fcd34d;background:#fffbeb">' +
+          '<b>承認待ちがあります</b>: 付与 ' + res.adminPending.grants + ' 件 / 利用 ' + res.adminPending.usages + ' 件 ' +
+          '<button class="btn sm" data-act="nav" data-view="admin" style="margin-left:8px">管理タブで確認</button></div>';
+      }
+
+      html += '<div class="card"><h2>残り利用時間</h2><div class="balance-grid">' +
+        balCard('残り合計', b.totalRemain, true) +
+        balCard('前年度繰越の残り' + (state.settings.carryExpired ? '(失効済み)' : ''), b.carryRemain, false) +
+        balCard('今年度分の残り', b.currentRemain, false) +
+        '</div>' +
+        '<p class="muted small" style="margin-top:8px">繰越分(前年度の残り)から自動的に先に使われます。' +
+        (state.settings.carryExpired ? '前年度繰越分は ' + esc(state.settings.expireDate) + ' に失効しました。' : '') +
+        (b.pendingUsage > 0 ? ' 承認待ちの利用が ' + fmtMin(b.pendingUsage) + ' あります(承認されると残りから引かれます)。' : '') +
+        (b.pendingGrant > 0 ? ' 承認待ちの付与が ' + fmtMin(b.pendingGrant) + ' あります(承認されると残りに足されます)。' : '') +
+        '</p></div>';
+
+      html += '<div class="card"><h2>累計(' + state.settings.nendo + '年度)</h2><div class="balance-grid">' +
+        balCard('累積超過時間(承認済み付与)', b.grantApproved, false) +
+        balCard('累積利用時間(承認済み)', b.carryUsed + b.currentUsed, false) +
+        balCard('前年度からの繰越', b.carryStart, false) +
+        '</div></div>';
+
+      var pendingItems = res.pendingMine.grants.map(function (g) {
+        return { kind: 'grant', id: g.id, text: '付与 ' + g.date + ' ' + g.start + '〜' + g.end + '(' + fmtMin(g.minutes) + ')' + (g.reason ? ' / ' + g.reason : '') };
+      }).concat(res.pendingMine.usages.map(function (u) {
+        return { kind: 'usage', id: u.id, text: '利用 ' + u.date + ' ' + u.start + '〜' + u.end + '(' + fmtMin(u.minutes) + ')' };
+      }));
+      html += '<div class="card"><h2>承認待ちの自分の申請</h2>';
+      if (!pendingItems.length) {
+        html += '<p class="muted">承認待ちの申請はありません。</p>';
+      } else {
+        html += pendingItems.map(function (it) {
+          return '<div class="pend-row"><span>' + esc(it.text) + '</span>' +
+            '<span class="pend-actions"><button class="btn sm secondary" data-act="withdraw" data-kind="' + it.kind + '" data-id="' + esc(it.id) + '">取り下げ</button></span></div>';
+        }).join('');
+      }
+      html += '</div>';
+
+      if (res.proposedPending && res.proposedPending.length) {
+        html += '<div class="card"><h2>自分が起案した承認待ちの付与(他の教職員分)</h2>' +
+          res.proposedPending.map(function (g) {
+            return '<div class="pend-row"><span>' + esc(g.targetName + ' さん / ' + g.date + ' ' + g.start + '〜' + g.end + '(' + fmtMin(g.minutes) + ')' + (g.reason ? ' / ' + g.reason : '')) + '</span>' +
+              '<span class="pend-actions"><button class="btn sm secondary" data-act="withdraw" data-kind="grant" data-id="' + esc(g.id) + '">取り下げ</button></span></div>';
+          }).join('') + '</div>';
+      }
+
+      html += '<div class="card"><h2>最近の申請</h2>';
+      if (!res.recent.length) {
+        html += '<p class="muted">まだ申請はありません。</p>';
+      } else {
+        html += '<div class="tbl-wrap"><table class="tbl"><tr><th>種別</th><th>日付</th><th>時間帯</th><th>時間</th><th>状態</th><th>内容</th></tr>' +
+          res.recent.map(function (r) {
+            return '<tr><td>' + (r.kind === 'grant' ? '付与' : '利用') + '</td><td>' + esc(r.date) + '</td><td>' + esc(r.start + '〜' + r.end) + '</td>' +
+              '<td class="num">' + fmtMin(r.minutes) + '</td><td>' + chip(r.status) + '</td><td>' + esc(r.label || '') + '</td></tr>';
+          }).join('') + '</table></div>';
+      }
+      html += '</div>';
+
+      html += '<details class="box"><summary>PIN(暗証番号)を変更する</summary>' +
+        '<label class="fld" style="margin-top:8px"><span class="cap">現在のPIN</span><input type="password" id="pin-old" inputmode="numeric" autocomplete="off"></label>' +
+        '<label class="fld"><span class="cap">新しいPIN(数字4〜8桁)</span><input type="password" id="pin-new1" inputmode="numeric" autocomplete="off"></label>' +
+        '<label class="fld"><span class="cap">新しいPIN(確認)</span><input type="password" id="pin-new2" inputmode="numeric" autocomplete="off"></label>' +
+        '<button class="btn sm" data-act="pin-change">変更する</button></details>';
+
+      $id('content').innerHTML = html;
+    });
+  };
+
+  function balCard(cap, minutes, main) {
+    return '<div class="bal' + (main ? ' main' : '') + '"><div class="cap">' + esc(cap) + '</div>' +
+      '<div class="val' + (minutes < 0 ? ' neg' : '') + '">' + fmtMin(minutes) + '</div></div>';
+  }
+
+  // ---- 利用申請 ----
+  views.usage = function () {
+    return api('apiGetMyPage').then(function (res) {
+      state.settings = res.settings;
+      var b = res.balance;
+      var workEnd = toMin(state.settings.workEnd);
+      var html = '<div class="card"><h2>利用申請(割り振り変更を取る)</h2>' +
+        '<p class="muted">勤務時間(' + esc(state.settings.workStart) + '〜' + esc(state.settings.workEnd) + ')のうち、勤務しない時間帯を5分単位で入力してください。管理職の承認後に確定します。</p>' +
+        '<div class="balance-grid" style="margin-bottom:12px">' +
+        balCard('利用可能時間(承認待ち分を除く)', b.available, true) +
+        '</div>' +
+        '<label class="fld"><span class="cap">取得日</span><input type="date" id="u-date" value="' + todayStr() + '" data-watch="preview"></label>' +
+        '<label class="fld"><span class="cap">時間帯</span><span class="timerange">' +
+        timeSelect('u-start', toTime(workEnd - 30)) + ' 〜 ' + timeSelect('u-end', toTime(workEnd)) +
+        '</span></label>' +
+        '<label class="fld"><span class="cap">備考(任意)</span><input type="text" id="u-note" maxlength="100"></label>' +
+        '<div class="preview" id="u-preview"></div>' +
+        '<button class="btn" data-act="usage-submit">この内容で申請する</button>' +
+        '</div>';
+      $id('content').innerHTML = html;
+      updateUsagePreview();
+    });
+  };
+
+  function updateUsagePreview() {
+    var el = $id('u-preview');
+    if (!el) return;
+    var s = toMin($id('u-start').value), e = toMin($id('u-end').value);
+    var ws = toMin(state.settings.workStart), we = toMin(state.settings.workEnd);
+    if (s == null || e == null || s >= e) { el.innerHTML = '終了時刻は開始時刻より後にしてください。'; return; }
+    var minutes = overlap(s, e, ws, we);
+    el.innerHTML = '利用時間: <b>' + fmtMin(minutes) + '</b><br><span class="muted small">勤務時間(' +
+      esc(state.settings.workStart) + '〜' + esc(state.settings.workEnd) + ')内の部分のみが利用時間になります。</span>';
+  }
+
+  function submitUsage() {
+    var date = $id('u-date').value;
+    var start = $id('u-start').value, end = $id('u-end').value;
+    var note = $id('u-note').value;
+    var s = toMin(start), e = toMin(end);
+    if (!date) { showError('取得日を入力してください。'); return; }
+    if (s == null || e == null || s >= e) { showError('時間帯を正しく入力してください。'); return; }
+    var minutes = overlap(s, e, toMin(state.settings.workStart), toMin(state.settings.workEnd));
+    if (minutes <= 0) { showError('入力された時間帯に勤務時間が含まれていません。'); return; }
+    if (!confirm('利用を申請します。\n\n取得日: ' + date + '\n時間帯: ' + start + '〜' + end + '\n利用時間: ' + fmtMin(minutes) + '\n\nよろしいですか?')) return;
+    api('apiSubmitUsage', { date: date, start: start, end: end, note: note }).then(function (res) {
+      showInfo('利用を申請しました(' + fmtMin(res.minutes) + ')。管理職の承認をお待ちください。');
+      switchView('mypage');
+    }).catch(function (e2) { showError(errMsg(e2)); });
+  }
+
+  // ---- 付与入力 ----
+  views.grant = function () {
+    return api('apiGetGrantTargets').then(function (targets) {
+      var workEnd = toMin(state.settings.workEnd);
+      var html = '<div class="card"><h2>付与入力(超過時間の割り振り)</h2>' +
+        '<p class="muted">会議等で発生した勤務超過の時間帯を入力してください。勤務時間(' + esc(state.settings.workStart) + '〜' + esc(state.settings.workEnd) + ')の外の部分が、選んだ全員に同じ分数で付与されます。管理職の承認後に確定します。</p>' +
+        '<label class="fld"><span class="cap">発生日</span><input type="date" id="g-date" value="' + todayStr() + '" data-watch="preview"></label>' +
+        '<label class="fld"><span class="cap">時間帯</span><span class="timerange">' +
+        timeSelect('g-start', toTime(workEnd)) + ' 〜 ' + timeSelect('g-end', toTime(workEnd + 30)) +
+        '</span></label>' +
+        '<label class="fld"><span class="cap">事由(会議名など)</span><input type="text" id="g-reason" maxlength="100" placeholder="例: 職員会議"></label>' +
+        '<div><span class="cap" style="font-size:13px;color:#374151">対象の教職員 ' +
+        '<button class="btn sm secondary" data-act="grant-toggle-all" style="margin-left:8px">全員選択 / 解除</button></span>' +
+        '<div class="check-list" id="g-targets">' +
+        targets.map(function (t) {
+          return '<label><input type="checkbox" value="' + esc(t.id) + '" data-watch="preview">' + esc(t.name) + '</label>';
+        }).join('') +
+        '</div></div>' +
+        '<div class="preview" id="g-preview"></div>' +
+        '<button class="btn" data-act="grant-submit">この内容で起案する</button>' +
+        '</div>';
+      $id('content').innerHTML = html;
+      updateGrantPreview();
+    });
+  };
+
+  function grantSelectedIds() {
+    return Array.prototype.slice.call(document.querySelectorAll('#g-targets input:checked')).map(function (c) { return c.value; });
+  }
+
+  function updateGrantPreview() {
+    var el = $id('g-preview');
+    if (!el) return;
+    var s = toMin($id('g-start').value), e = toMin($id('g-end').value);
+    var ws = toMin(state.settings.workStart), we = toMin(state.settings.workEnd);
+    if (s == null || e == null || s >= e) { el.innerHTML = '終了時刻は開始時刻より後にしてください。'; return; }
+    var minutes = (e - s) - overlap(s, e, ws, we);
+    var n = grantSelectedIds().length;
+    el.innerHTML = '付与時間: <b>' + fmtMin(minutes) + '</b> × ' + n + '名<br><span class="muted small">勤務時間(' +
+      esc(state.settings.workStart) + '〜' + esc(state.settings.workEnd) + ')の外の部分のみが付与時間になります。</span>';
+  }
+
+  function submitGrant() {
+    var date = $id('g-date').value;
+    var start = $id('g-start').value, end = $id('g-end').value;
+    var reason = $id('g-reason').value.trim();
+    var ids = grantSelectedIds();
+    var s = toMin(start), e = toMin(end);
+    if (!date) { showError('発生日を入力してください。'); return; }
+    if (s == null || e == null || s >= e) { showError('時間帯を正しく入力してください。'); return; }
+    if (!reason) { showError('事由を入力してください。'); return; }
+    if (!ids.length) { showError('対象の教職員を選択してください。'); return; }
+    var minutes = (e - s) - overlap(s, e, toMin(state.settings.workStart), toMin(state.settings.workEnd));
+    if (minutes <= 0) { showError('入力された時間帯はすべて勤務時間内のため、付与時間が0分になります。'); return; }
+    if (!confirm('付与を起案します。\n\n発生日: ' + date + '\n時間帯: ' + start + '〜' + end + '\n付与時間: ' + fmtMin(minutes) + ' × ' + ids.length + '名\n事由: ' + reason + '\n\nよろしいですか?')) return;
+    api('apiSubmitGrant', { date: date, start: start, end: end, reason: reason, teacherIds: ids }).then(function (res) {
+      showInfo('付与を起案しました(' + fmtMin(res.minutes) + ' × ' + res.count + '名)。管理職の承認をお待ちください。');
+      switchView('mypage');
+    }).catch(function (e2) { showError(errMsg(e2)); });
+  }
+
+  // ---- 割り振り変更簿(自分) ----
+  views.ledger = function () {
+    return api('apiGetMyRecords').then(function (res) {
+      state.settings = res.settings;
+      var b = res.balance;
+      var html = '<div class="card"><h2>割り振り変更簿(' + state.settings.nendo + '年度・' + esc(state.user.name) + ')</h2>' +
+        '<div class="balance-grid">' +
+        balCard('累積超過時間(承認済み付与)', b.grantApproved, false) +
+        balCard('累積利用時間', b.carryUsed + b.currentUsed, false) +
+        balCard('残り利用時間', b.totalRemain, true) +
+        '</div>' +
+        '<p class="muted small" style="margin-top:8px">内訳: 前年度繰越 ' + fmtMin(b.carryStart) + ' のうち残り ' + fmtMin(b.carryRemain) +
+        (state.settings.carryExpired ? '(失効済み)' : '') + ' / 今年度分の残り ' + fmtMin(b.currentRemain) + '</p></div>';
+
+      html += '<div class="card"><h2>付与の履歴</h2>' + grantTable(res.grants, false) + '</div>';
+      html += '<div class="card"><h2>利用の履歴</h2>' + usageTable(res.usages, false) + '</div>';
+      $id('content').innerHTML = html;
+    });
+  };
+
+  function grantTable(grants, showName) {
+    if (!grants.length) return '<p class="muted">記録がありません。</p>';
+    var rows = grants.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+    return '<div class="tbl-wrap"><table class="tbl"><tr>' +
+      (showName ? '<th>対象者</th>' : '') +
+      '<th>発生日</th><th>時間帯</th><th>付与時間</th><th>事由</th><th>起案者</th><th>状態</th><th>処理</th></tr>' +
+      rows.map(function (g) {
+        return '<tr>' + (showName ? '<td>' + esc(g.targetName) + '</td>' : '') +
+          '<td>' + esc(g.date) + '</td><td>' + esc(g.start + '〜' + g.end) + '</td><td class="num">' + fmtMin(g.minutes) + '</td>' +
+          '<td>' + esc(g.reason) + '</td><td>' + esc(g.proposerName) + '</td><td>' + chip(g.status) + '</td>' +
+          '<td class="small muted">' + esc(decideInfo(g)) + '</td></tr>';
+      }).join('') + '</table></div>';
+  }
+
+  function usageTable(usages, showName) {
+    if (!usages.length) return '<p class="muted">記録がありません。</p>';
+    var rows = usages.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+    return '<div class="tbl-wrap"><table class="tbl"><tr>' +
+      (showName ? '<th>教職員</th>' : '') +
+      '<th>取得日</th><th>時間帯</th><th>利用時間</th><th>内訳(繰越/今年度)</th><th>備考</th><th>状態</th><th>処理</th></tr>' +
+      rows.map(function (u) {
+        var breakdown = u.status === '承認済み' || u.status === '取消'
+          ? fmtMin(u.carryUsed) + ' / ' + fmtMin(u.currentUsed) : '-';
+        return '<tr>' + (showName ? '<td>' + esc(u.memberName) + '</td>' : '') +
+          '<td>' + esc(u.date) + '</td><td>' + esc(u.start + '〜' + u.end) + '</td><td class="num">' + fmtMin(u.minutes) + '</td>' +
+          '<td class="num">' + breakdown + '</td><td>' + esc(u.note) + '</td><td>' + chip(u.status) + '</td>' +
+          '<td class="small muted">' + esc(decideInfo(u)) + '</td></tr>';
+      }).join('') + '</table></div>';
+  }
+
+  function decideInfo(r) {
+    var parts = [];
+    if (r.decidedBy) parts.push(r.decidedBy + ' ' + r.decidedAt);
+    if (r.decideMemo) parts.push(r.decideMemo);
+    if (r.canceledBy) parts.push('取消: ' + r.canceledBy + ' ' + r.canceledAt);
+    return parts.join(' / ');
+  }
+
+  // ---- 日別一覧(自分) ----
+  views.daily = function () {
+    return api('apiGetMyRecords').then(function (res) {
+      state.settings = res.settings;
+      state.myRecords = res;
+      $id('content').innerHTML =
+        '<div class="card"><h2>日別一覧</h2>' +
+        '<div class="subtabs">' +
+        '<button class="sub active" id="d-kind-usage" data-act="daily-kind" data-kind="usage">利用日別</button>' +
+        '<button class="sub" id="d-kind-grant" data-act="daily-kind" data-kind="grant">付与日別</button>' +
+        '</div><div id="d-body"></div></div>';
+      renderDaily('usage');
+    });
+  };
+
+  function renderDaily(kind) {
+    $id('d-kind-usage').className = 'sub' + (kind === 'usage' ? ' active' : '');
+    $id('d-kind-grant').className = 'sub' + (kind === 'grant' ? ' active' : '');
+    var res = state.myRecords;
+    var items = kind === 'usage'
+      ? res.usages.map(function (u) { return { date: u.date, start: u.start, end: u.end, minutes: u.minutes, status: u.status, label: u.note }; })
+      : res.grants.map(function (g) { return { date: g.date, start: g.start, end: g.end, minutes: g.minutes, status: g.status, label: g.reason }; });
+    $id('d-body').innerHTML = dayGroups(items, false);
+  }
+
+  /** 日付ごとにまとめて表示する(合計は承認済みのみ) */
+  function dayGroups(items, showName) {
+    if (!items.length) return '<p class="muted">記録がありません。</p>';
+    var byDate = {};
+    items.forEach(function (r) { (byDate[r.date] = byDate[r.date] || []).push(r); });
+    return Object.keys(byDate).sort().reverse().map(function (d) {
+      var rows = byDate[d];
+      var total = rows.filter(function (r) { return r.status === '承認済み'; })
+        .reduce(function (s, r) { return s + r.minutes; }, 0);
+      return '<div class="day-group"><div class="day-head"><span>' + esc(d) + '</span><span>承認済み合計: ' + fmtMin(total) + '</span></div>' +
+        '<div class="day-body">' + rows.map(function (r) {
+          return '<div class="day-row">' +
+            (showName ? '<b>' + esc(r.name) + '</b>' : '') +
+            '<span>' + esc(r.start + '〜' + r.end) + '</span><span>' + fmtMin(r.minutes) + '</span>' +
+            chip(r.status) +
+            (r.label ? '<span class="muted small">' + esc(r.label) + '</span>' : '') +
+            '</div>';
+        }).join('') + '</div></div>';
+    }).join('');
+  }
+
+  // ---- 管理(管理職のみ) ----
+  views.admin = function () {
+    return api('apiAdminGetAll').then(function (res) {
+      state.adminData = res;
+      state.settings = res.settings;
+      var pendG = res.grants.filter(function (g) { return g.status === '承認待ち'; }).length;
+      var pendU = res.usages.filter(function (u) { return u.status === '承認待ち'; }).length;
+      var subs = [
+        { id: 'pending', label: '承認待ち(' + (pendG + pendU) + ')' },
+        { id: 'summary', label: '全体サマリ' },
+        { id: 'adaily', label: '日別(全員)' },
+        { id: 'records', label: '全履歴' },
+        { id: 'roster', label: '名簿' },
+        { id: 'year', label: '年次更新' },
+        { id: 'settings', label: '設定' },
+      ];
+      $id('content').innerHTML =
+        '<div class="subtabs">' + subs.map(function (s) {
+          return '<button class="sub' + (s.id === state.adminSub ? ' active' : '') + '" data-act="admin-sub" data-sub="' + s.id + '">' + s.label + '</button>';
+        }).join('') + '</div><div id="admin-body"></div>';
+      renderAdminSub();
+      return null;
+    });
+  };
+
+  function refreshAdmin() {
+    return views.admin().catch(function (e) { showError(errMsg(e)); });
+  }
+
+  function renderAdminSub() {
+    var fn = adminSubs[state.adminSub];
+    if (fn) fn($id('admin-body'), state.adminData);
+  }
+
+  var adminSubs = {};
+
+  // 承認待ち
+  adminSubs.pending = function (el, data) {
+    var html = '';
+    var pendingGrants = data.grants.filter(function (g) { return g.status === '承認待ち'; });
+    var pendingUsages = data.usages.filter(function (u) { return u.status === '承認待ち'; });
+
+    html += '<div class="card"><h2>付与の承認待ち(' + pendingGrants.length + '件)</h2>';
+    if (!pendingGrants.length) {
+      html += '<p class="muted">承認待ちの付与はありません。</p>';
+    } else {
+      var byGroup = {};
+      var order = [];
+      pendingGrants.forEach(function (g) {
+        if (!byGroup[g.groupId]) { byGroup[g.groupId] = []; order.push(g.groupId); }
+        byGroup[g.groupId].push(g);
+      });
+      html += order.map(function (gid) {
+        var rows = byGroup[gid];
+        var head = rows[0];
+        var allIds = rows.map(function (r) { return r.id; }).join(',');
+        return '<div class="pend-group"><div class="pg-head">' +
+          '<b>' + esc(head.date) + ' ' + esc(head.start + '〜' + head.end) + '</b>(1人あたり ' + fmtMin(head.minutes) + ')<br>' +
+          '<span class="muted small">事由: ' + esc(head.reason) + ' / 起案: ' + esc(head.proposerName) + ' ' + esc(head.requestedAt) + '</span>' +
+          '<div style="margin-top:6px"><button class="btn sm" data-act="decide" data-kind="grant" data-ids="' + esc(allIds) + '" data-action="approve">全員を承認</button> ' +
+          '<button class="btn sm danger" data-act="decide" data-kind="grant" data-ids="' + esc(allIds) + '" data-action="reject">全員を却下</button></div>' +
+          '</div><div class="pg-body">' +
+          rows.map(function (r) {
+            return '<div class="pend-row"><span>' + esc(r.targetName) + ' さん</span>' +
+              '<span class="pend-actions">' +
+              '<button class="btn sm" data-act="decide" data-kind="grant" data-ids="' + esc(r.id) + '" data-action="approve">承認</button>' +
+              '<button class="btn sm danger" data-act="decide" data-kind="grant" data-ids="' + esc(r.id) + '" data-action="reject">却下</button>' +
+              '</span></div>';
+          }).join('') + '</div></div>';
+      }).join('');
+    }
+    html += '</div>';
+
+    html += '<div class="card"><h2>利用の承認待ち(' + pendingUsages.length + '件)</h2>';
+    if (!pendingUsages.length) {
+      html += '<p class="muted">承認待ちの利用はありません。</p>';
+    } else {
+      html += pendingUsages.map(function (u) {
+        var b = findOverview(data, u.memberId);
+        return '<div class="pend-group"><div class="pg-head">' +
+          '<b>' + esc(u.memberName) + ' さん</b> ' + esc(u.date) + ' ' + esc(u.start + '〜' + u.end) + '(' + fmtMin(u.minutes) + ')' +
+          (u.note ? '<br><span class="muted small">備考: ' + esc(u.note) + '</span>' : '') +
+          '<br><span class="muted small">申請: ' + esc(u.requestedAt) + ' / 本人の残り: ' + (b ? fmtMin(b.totalRemain) : '不明') + '</span>' +
+          '<div style="margin-top:6px"><button class="btn sm" data-act="decide" data-kind="usage" data-ids="' + esc(u.id) + '" data-action="approve">承認</button> ' +
+          '<button class="btn sm danger" data-act="decide" data-kind="usage" data-ids="' + esc(u.id) + '" data-action="reject">却下</button></div>' +
+          '</div></div>';
+      }).join('');
+    }
+    html += '</div>';
+    el.innerHTML = html;
+  };
+
+  function findOverview(data, memberId) {
+    return data.overview.filter(function (o) { return o.id === memberId; })[0];
+  }
+
+  function doDecide(kind, ids, action) {
+    var idList = ids.split(',');
+    var label = (kind === 'grant' ? '付与' : '利用') + ' ' + idList.length + '件';
+    var memo = '';
+    if (action === 'reject') {
+      var input = prompt(label + ' を却下します。理由(任意・本人に通知されます):', '');
+      if (input === null) return;
+      memo = input;
+    } else {
+      if (!confirm(label + ' を承認します。よろしいですか?')) return;
+    }
+    api('apiAdminDecide', kind, idList, action, memo).then(function (res) {
+      var text = (action === 'approve' ? '承認' : '却下') + ': ' + res.done.length + '件 完了';
+      if (res.errors.length) text += '\n' + res.errors.map(function (e) { return e.message; }).join('\n');
+      (res.errors.length ? showError : showInfo)(text);
+      refreshAdmin();
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  // 全体サマリ
+  adminSubs.summary = function (el, data) {
+    el.innerHTML = '<div class="card"><h2>全職員サマリ(' + data.settings.nendo + '年度)</h2>' +
+      (data.settings.carryExpired ? '<p class="muted small">前年度繰越分は ' + esc(data.settings.expireDate) + ' に失効済みです。</p>' : '') +
+      '<div class="tbl-wrap"><table class="tbl">' +
+      '<tr><th>氏名</th><th>役職</th><th>繰越</th><th>繰越残</th><th>今年度付与</th><th>累積利用</th><th>今年度残</th><th>残り合計</th><th>承認待ち</th></tr>' +
+      data.overview.map(function (o) {
+        var pend = [];
+        if (o.pendingGrant) pend.push('付与' + fmtMin(o.pendingGrant));
+        if (o.pendingUsage) pend.push('利用' + fmtMin(o.pendingUsage));
+        return '<tr class="' + (o.status !== '在籍' ? 'inactive' : '') + '">' +
+          '<td>' + esc(o.name) + (o.status !== '在籍' ? '(停止)' : '') + '</td><td>' + esc(o.role) + '</td>' +
+          '<td class="num">' + fmtMin(o.carryStart) + '</td><td class="num">' + fmtMin(o.carryRemain) + '</td>' +
+          '<td class="num">' + fmtMin(o.grantApproved) + '</td><td class="num">' + fmtMin(o.usedTotal) + '</td>' +
+          '<td class="num' + (o.currentRemain < 0 ? ' danger-text' : '') + '">' + fmtMin(o.currentRemain) + '</td>' +
+          '<td class="num"><b>' + fmtMin(o.totalRemain) + '</b></td>' +
+          '<td class="small">' + (pend.join(' / ') || '-') + '</td></tr>';
+      }).join('') + '</table></div></div>';
+  };
+
+  // 日別(全員)
+  adminSubs.adaily = function (el, data) {
+    el.innerHTML = '<div class="card"><h2>日別一覧(全員)</h2>' +
+      '<div class="subtabs">' +
+      '<button class="sub active" id="ad-kind-usage" data-act="adaily-kind" data-kind="usage">利用日別</button>' +
+      '<button class="sub" id="ad-kind-grant" data-act="adaily-kind" data-kind="grant">付与日別</button>' +
+      '</div><div id="ad-body"></div></div>';
+    renderAdminDaily('usage');
+  };
+
+  function renderAdminDaily(kind) {
+    $id('ad-kind-usage').className = 'sub' + (kind === 'usage' ? ' active' : '');
+    $id('ad-kind-grant').className = 'sub' + (kind === 'grant' ? ' active' : '');
+    var data = state.adminData;
+    var items = kind === 'usage'
+      ? data.usages.map(function (u) { return { date: u.date, start: u.start, end: u.end, minutes: u.minutes, status: u.status, name: u.memberName, label: u.note }; })
+      : data.grants.map(function (g) { return { date: g.date, start: g.start, end: g.end, minutes: g.minutes, status: g.status, name: g.targetName, label: g.reason }; });
+    $id('ad-body').innerHTML = dayGroups(items, true);
+  }
+
+  // 全履歴
+  adminSubs.records = function (el, data) {
+    var f = state.adminFilter;
+    el.innerHTML = '<div class="card"><h2>全履歴</h2>' +
+      '<div class="timerange" style="margin-bottom:10px">' +
+      '<select id="f-kind" data-watch="records-filter"><option value="">種別: すべて</option><option value="grant"' + (f.kind === 'grant' ? ' selected' : '') + '>付与</option><option value="usage"' + (f.kind === 'usage' ? ' selected' : '') + '>利用</option></select>' +
+      '<select id="f-status" data-watch="records-filter"><option value="">状態: すべて</option>' +
+      ['承認待ち', '承認済み', '却下', '取消', '取下げ'].map(function (s) {
+        return '<option value="' + s + '"' + (f.status === s ? ' selected' : '') + '>' + s + '</option>';
+      }).join('') + '</select>' +
+      '<select id="f-member" data-watch="records-filter"><option value="">教職員: 全員</option>' +
+      data.roster.map(function (m) {
+        return '<option value="' + esc(m.id) + '"' + (f.member === m.id ? ' selected' : '') + '>' + esc(m.name) + '</option>';
+      }).join('') + '</select>' +
+      '</div><div id="rec-body"></div>' +
+      '<p class="muted small">承認済みの行は「取消」で無効にできます(行は残り、残時間が元に戻ります)。</p></div>';
+    renderRecordsTable();
+  };
+
+  function renderRecordsTable() {
+    var data = state.adminData;
+    var f = state.adminFilter;
+    var items = [];
+    if (f.kind !== 'usage') {
+      data.grants.forEach(function (g) {
+        items.push({ kind: 'grant', id: g.id, memberId: g.targetId, name: g.targetName, date: g.date, start: g.start, end: g.end, minutes: g.minutes, status: g.status, label: '事由: ' + g.reason + ' / 起案: ' + g.proposerName, info: decideInfo(g), requestedAt: g.requestedAt });
+      });
+    }
+    if (f.kind !== 'grant') {
+      data.usages.forEach(function (u) {
+        items.push({ kind: 'usage', id: u.id, memberId: u.memberId, name: u.memberName, date: u.date, start: u.start, end: u.end, minutes: u.minutes, status: u.status, label: (u.note ? '備考: ' + u.note : '') + (u.status === '承認済み' || u.status === '取消' ? '(繰越' + fmtMin(u.carryUsed) + '/今年度' + fmtMin(u.currentUsed) + ')' : ''), info: decideInfo(u), requestedAt: u.requestedAt });
+      });
+    }
+    items = items.filter(function (it) {
+      if (f.status && it.status !== f.status) return false;
+      if (f.member && it.memberId !== f.member) return false;
+      return true;
+    }).sort(function (a, b) { return a.requestedAt < b.requestedAt ? 1 : -1; });
+
+    $id('rec-body').innerHTML = !items.length ? '<p class="muted">該当する記録がありません。</p>' :
+      '<div class="tbl-wrap"><table class="tbl">' +
+      '<tr><th>ID</th><th>種別</th><th>教職員</th><th>日付</th><th>時間帯</th><th>時間</th><th>状態</th><th>内容</th><th>処理</th><th></th></tr>' +
+      items.map(function (it) {
+        return '<tr><td>' + esc(it.id) + '</td><td>' + (it.kind === 'grant' ? '付与' : '利用') + '</td><td>' + esc(it.name) + '</td>' +
+          '<td>' + esc(it.date) + '</td><td>' + esc(it.start + '〜' + it.end) + '</td><td class="num">' + fmtMin(it.minutes) + '</td>' +
+          '<td>' + chip(it.status) + '</td><td class="small">' + esc(it.label) + '</td><td class="small muted">' + esc(it.info) + '</td>' +
+          '<td>' + (it.status === '承認済み' ? '<button class="btn sm danger" data-act="rec-cancel" data-kind="' + it.kind + '" data-id="' + esc(it.id) + '">取消</button>' : '') + '</td></tr>';
+      }).join('') + '</table></div>';
+  }
+
+  function doCancel(kind, id, force) {
+    if (!force && !confirm((kind === 'grant' ? '付与' : '利用') + ' ' + id + ' を取り消します。残時間が元に戻ります。よろしいですか?')) return;
+    api('apiAdminCancel', kind, id, !!force).then(function (res) {
+      if (res.needConfirm) {
+        if (confirm(res.message)) doCancel(kind, id, true);
+        return;
+      }
+      showInfo(res.message);
+      refreshAdmin();
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  // 名簿
+  adminSubs.roster = function (el, data) {
+    var m = state.editingMember;
+    var html = '<div class="card"><h2>名簿管理</h2>' +
+      '<p class="muted small">PINは本人確認用の暗証番号です。教職員は自分のマイページからPINを変更できます。繰越時間は年次更新で自動計算されます(修正が必要なときはスプレッドシートの「名簿」シートを直接編集してください)。</p>' +
+      '<button class="btn sm" data-act="m-new" style="margin-bottom:10px">+ 新しい教職員を追加</button>';
+
+    if (m) {
+      html += '<div class="card" style="background:#f8fafc">' +
+        '<h3>' + (m.id ? esc(m.id) + ' の編集' : '新規追加') + '</h3>' +
+        '<label class="fld"><span class="cap">氏名</span><input type="text" id="m-name" value="' + esc(m.name || '') + '"></label>' +
+        '<label class="fld"><span class="cap">役職</span><select id="m-role">' +
+        ['教員', '主任', '管理職'].map(function (r) { return '<option' + (m.role === r ? ' selected' : '') + '>' + r + '</option>'; }).join('') +
+        '</select></label>' +
+        '<label class="fld"><span class="cap">PIN(数字4〜8桁。空欄の間はログイン不可)</span><input type="text" id="m-pin" value="' + esc(m.pin || '') + '" inputmode="numeric"></label>' +
+        '<label class="fld"><span class="cap">メールアドレス(任意。登録すると通知メールが届く)</span><input type="text" id="m-email" value="' + esc(m.email || '') + '"></label>' +
+        '<label class="fld"><span class="cap">状態(転出した人は「停止」に)</span><select id="m-status">' +
+        ['在籍', '停止'].map(function (s) { return '<option' + ((m.status || '在籍') === s ? ' selected' : '') + '>' + s + '</option>'; }).join('') +
+        '</select></label>' +
+        '<label class="fld"><span class="cap">備考(任意)</span><input type="text" id="m-note" value="' + esc(m.note || '') + '"></label>' +
+        '<button class="btn" data-act="m-save" data-id="' + esc(m.id || '') + '">保存</button> ' +
+        '<button class="btn secondary" data-act="m-cancel-edit">キャンセル</button>' +
+        '</div>';
+    }
+
+    html += '<div class="tbl-wrap"><table class="tbl">' +
+      '<tr><th>ID</th><th>氏名</th><th>役職</th><th>PIN</th><th>メール</th><th>状態</th><th>繰越(分)</th><th>備考</th><th></th></tr>' +
+      data.roster.map(function (r) {
+        return '<tr class="' + (r.status !== '在籍' ? 'inactive' : '') + '">' +
+          '<td>' + esc(r.id) + '</td><td>' + esc(r.name) + '</td><td>' + esc(r.role) + '</td>' +
+          '<td>' + esc(r.pin || '(未設定)') + '</td><td>' + esc(r.email || '-') + '</td><td>' + esc(r.status) + '</td>' +
+          '<td class="num">' + r.carryMin + '</td><td class="small">' + esc(r.note) + '</td>' +
+          '<td><button class="btn sm secondary" data-act="m-edit" data-id="' + esc(r.id) + '">編集</button></td></tr>';
+      }).join('') + '</table></div></div>';
+    el.innerHTML = html;
+  };
+
+  function saveMember(id) {
+    var payload = {
+      id: id || '',
+      name: $id('m-name').value,
+      role: $id('m-role').value,
+      pin: $id('m-pin').value,
+      email: $id('m-email').value,
+      status: $id('m-status').value,
+      note: $id('m-note').value,
+    };
+    api('apiAdminSaveMember', payload).then(function (res) {
+      showInfo('保存しました(' + res.id + ')。');
+      state.editingMember = null;
+      refreshAdmin();
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  // 年次更新
+  adminSubs.year = function (el, data) {
+    var s = data.settings;
+    el.innerHTML =
+      '<div class="card"><h2>年次更新</h2>' +
+      '<p>現在: <b>' + s.nendo + '年度</b> / 前年度繰越分: ' +
+      (s.carryExpired ? '<b class="danger-text">失効済み(' + esc(s.expireDate) + ')</b>' : '<b>有効</b>') + '</p>' +
+      '<p class="muted small">年次更新は2段階です。順番と時期に注意してください。</p>' +
+
+      '<div class="card" style="background:#f8fafc"><h3>① 年度切替(4月頃に実行)</h3>' +
+      '<p class="muted">実行すると次の処理が行われます:</p>' +
+      '<ul class="muted small"><li>スプレッドシート全体のバックアップコピーを作成(Googleドライブに保存)</li>' +
+      '<li>各自の残り時間(繰越残+今年度残)を新年度の「繰越時間」として名簿に記録</li>' +
+      '<li>付与・利用・通知ログの全データを削除し、年度を ' + s.nendo + ' → ' + (s.nendo + 1) + ' に変更</li></ul>' +
+      '<p class="muted small">実行前に承認待ちをすべて処理してください。実行後に名簿の転出・転入を整理してください。</p>' +
+      '<label class="fld"><span class="cap">確認のため「年度切替」と入力</span><input type="text" id="ys-input"></label>' +
+      '<button class="btn danger" data-act="ys-run">年度切替を実行</button></div>' +
+
+      '<div class="card" style="background:#f8fafc"><h3>② 前年度繰越分の失効(6月頃に実行)</h3>' +
+      '<p class="muted">前年度から繰り越した残り時間を使えなくします。各自の今年度分の残りはそのまま残ります。</p>' +
+      '<label class="fld"><span class="cap">確認のため「失効」と入力</span><input type="text" id="exp-input"></label>' +
+      '<button class="btn danger" data-act="exp-run"' + (s.carryExpired ? ' disabled' : '') + '>繰越分を失効させる</button>' +
+      (s.carryExpired ? '<p class="muted small">すでに失効済みです。誤って実行した場合は「設定」シートの「繰越失効日」セルを空にすると元に戻ります。</p>' : '') +
+      '</div></div>';
+  };
+
+  function runYearSwitch() {
+    var text = $id('ys-input').value;
+    if (!confirm('年度切替を実行します。付与・利用の全データが削除されます(バックアップは自動作成されます)。本当によろしいですか?')) return;
+    api('apiAdminYearSwitch', text).then(function (res) {
+      var lines = res.carried.length
+        ? res.carried.map(function (c) { return c.name + ': ' + fmtMin(c.minutes); }).join('\n')
+        : '(在籍者がいません)';
+      alert('年度切替が完了しました。' + res.newNendo + '年度を開始します。\n\n' +
+        'バックアップ(Googleドライブに保存):\n' + res.backupName + '\n\n' +
+        '【新年度への繰越時間】\n' + lines + '\n\n' +
+        '続いて名簿タブで転出者を「停止」にし、転入者を追加してください。');
+      // ヘッダーの年度表示を更新してから管理画面を読み直す
+      state.settings.nendo = res.newNendo;
+      state.settings.carryExpired = false;
+      state.settings.expireDate = '';
+      renderApp();
+      switchView('admin');
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  function runExpire() {
+    var text = $id('exp-input').value;
+    if (!confirm('前年度繰越分を失効させます。よろしいですか?')) return;
+    api('apiAdminExpireCarryover', text).then(function (res) {
+      var lines = res.affected.length
+        ? res.affected.map(function (a) { return a.name + ': ' + fmtMin(a.minutes); }).join('\n')
+        : '(繰越残が残っている人はいませんでした)';
+      alert('前年度繰越分を失効させました(' + res.date + ')。\n\n【失効した残り時間】\n' + lines);
+      refreshAdmin();
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  // 設定
+  adminSubs.settings = function (el, data) {
+    var s = data.settings;
+    el.innerHTML = '<div class="card"><h2>設定</h2>' +
+      '<label class="fld"><span class="cap">学校名(画面に表示)</span><input type="text" id="s-school" value="' + esc(s.schoolName) + '"></label>' +
+      '<label class="fld"><span class="cap">勤務時間</span><span class="timerange">' +
+      timeSelect('s-wstart', s.workStart) + ' 〜 ' + timeSelect('s-wend', s.workEnd) + '</span>' +
+      '<span class="muted small">付与は勤務時間の外、利用は勤務時間の中の分数で計算されます。</span></label>' +
+      '<label class="fld"><input type="checkbox" id="s-mail-admins"' + (s.mailToAdmins ? ' checked' : '') + '> 申請があったとき管理職へ承認依頼メールを送る</label>' +
+      '<label class="fld"><input type="checkbox" id="s-mail-members"' + (s.mailToMembers ? ' checked' : '') + '> 承認・却下・取消のとき本人へ結果メールを送る(メール登録者のみ)</label>' +
+      '<button class="btn" data-act="s-save">保存</button>' +
+      '<p class="muted small" style="margin-top:10px">メールは、このシステムを設置したGoogleアカウントから送信されます。宛先は名簿のメールアドレス欄で管理します。</p></div>';
+  };
+
+  function saveSettings() {
+    api('apiAdminSaveSettings', {
+      schoolName: $id('s-school').value,
+      workStart: $id('s-wstart').value,
+      workEnd: $id('s-wend').value,
+      mailToAdmins: $id('s-mail-admins').checked,
+      mailToMembers: $id('s-mail-members').checked,
+    }).then(function (res) {
+      state.settings = res;
+      if (state.adminData) state.adminData.settings = res;
+      showInfo('設定を保存しました。');
+      renderApp();
+      switchView('admin');
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  // ---------------------------------------------------------------- 操作のディスパッチ
+  function handleAction(act, ds) {
+    switch (act) {
+      case 'login': doLogin(); break;
+      case 'logout':
+        if (state.token) gsRaw('apiLogout', [state.token]);
+        clearSession();
+        renderLogin();
+        break;
+      case 'reload': switchView(state.view); break;
+      case 'nav': switchView(ds.view); break;
+      case 'withdraw':
+        if (confirm('この申請を取り下げます。よろしいですか?')) {
+          api('apiWithdraw', ds.kind, ds.id).then(function () {
+            showInfo('取り下げました。');
+            switchView('mypage');
+          }).catch(function (e) { showError(errMsg(e)); });
+        }
+        break;
+      case 'pin-change': {
+        var p1 = $id('pin-new1').value, p2 = $id('pin-new2').value;
+        if (p1 !== p2) { showError('新しいPINが一致しません。'); break; }
+        api('apiChangePin', $id('pin-old').value, p1).then(function () {
+          showInfo('PINを変更しました。');
+          switchView('mypage');
+        }).catch(function (e) { showError(errMsg(e)); });
+        break;
+      }
+      case 'usage-submit': submitUsage(); break;
+      case 'grant-submit': submitGrant(); break;
+      case 'grant-toggle-all': {
+        var boxes = document.querySelectorAll('#g-targets input');
+        var allChecked = Array.prototype.every.call(boxes, function (b) { return b.checked; });
+        Array.prototype.forEach.call(boxes, function (b) { b.checked = !allChecked; });
+        updateGrantPreview();
+        break;
+      }
+      case 'daily-kind': renderDaily(ds.kind); break;
+      case 'admin-sub': state.adminSub = ds.sub; renderAdminSubFromCache(); break;
+      case 'adaily-kind': renderAdminDaily(ds.kind); break;
+      case 'decide': doDecide(ds.kind, ds.ids, ds.action); break;
+      case 'rec-cancel': doCancel(ds.kind, ds.id, false); break;
+      case 'm-new': state.editingMember = {}; renderAdminSubFromCache(); break;
+      case 'm-edit': {
+        var found = state.adminData.roster.filter(function (r) { return r.id === ds.id; })[0];
+        state.editingMember = found ? JSON.parse(JSON.stringify(found)) : null;
+        renderAdminSubFromCache();
+        break;
+      }
+      case 'm-cancel-edit': state.editingMember = null; renderAdminSubFromCache(); break;
+      case 'm-save': saveMember(ds.id); break;
+      case 'ys-run': runYearSwitch(); break;
+      case 'exp-run': runExpire(); break;
+      case 's-save': saveSettings(); break;
+    }
+  }
+
+  function renderAdminSubFromCache() {
+    // サブタブの切替表示を更新してから中身を描く
+    var btns = document.querySelectorAll('.subtabs [data-act="admin-sub"]');
+    Array.prototype.forEach.call(btns, function (b) {
+      b.className = 'sub' + (b.getAttribute('data-sub') === state.adminSub ? ' active' : '');
+    });
+    renderAdminSub();
+  }
+
+  function handleWatch(watch) {
+    if (watch === 'preview') {
+      if ($id('u-preview')) updateUsagePreview();
+      if ($id('g-preview')) updateGrantPreview();
+    } else if (watch === 'records-filter') {
+      state.adminFilter = {
+        kind: $id('f-kind').value,
+        status: $id('f-status').value,
+        member: $id('f-member').value,
+      };
+      renderRecordsTable();
+    }
+  }
+
+  // ---------------------------------------------------------------- 起動
+  document.getElementById('app').addEventListener('click', function (ev) {
+    var b = ev.target.closest('[data-act]');
+    if (!b || b.disabled) return;
+    handleAction(b.getAttribute('data-act'), {
+      view: b.getAttribute('data-view'),
+      kind: b.getAttribute('data-kind'),
+      id: b.getAttribute('data-id'),
+      ids: b.getAttribute('data-ids'),
+      action: b.getAttribute('data-action'),
+      sub: b.getAttribute('data-sub'),
+    });
+  });
+  document.getElementById('app').addEventListener('change', function (ev) {
+    var t = ev.target.closest('[data-watch]');
+    if (t) handleWatch(t.getAttribute('data-watch'));
+  });
+  document.getElementById('app').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' && ev.target.id === 'login-pin') doLogin();
+  });
+
+  function boot() {
+    if (!state.token) { renderLogin(); return; }
+    showBusy(true);
+    gsRaw('apiGetMyPage', [state.token]).then(function (res) {
+      state.user = res.user;
+      state.settings = res.settings;
+      renderApp();
+      state.view = 'mypage';
+      renderTabs();
+      // 取得済みデータの再利用はせず、描画処理を一本化するため改めて表示する
+      switchView('mypage');
+    }).catch(function () {
+      clearSession();
+      renderLogin();
+    });
+  }
+
+  boot();
+})();
+</script>
