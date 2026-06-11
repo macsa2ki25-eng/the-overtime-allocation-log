@@ -4,15 +4,38 @@
  * すべての関数は第1引数に token(ログイン時に発行される)を受け取る。
  */
 
-/** マイページ表示用のまとめデータ */
-function apiGetMyPage(token) {
-  const user = requireUser_(token);
+/**
+ * ログイン後に必要なデータを役割に応じて1回でまとめて返す。
+ * 画面側はこの結果を使い回すため、タブを切り替えるたびの通信は発生しない。
+ * シートの読み出しは1回分で済むので、画面ごとに個別に取るより速い。
+ */
+function apiGetAllData(token) {
+  return allDataFor_(requireUser_(token));
+}
+
+/** 本人の役割に応じた全タブ分のデータを組み立てる(apiLogin からも使う) */
+function allDataFor_(user) {
   const settings = getSettings_();
   const roster = getRoster_();
   const grants = getGrants_();
   const usages = getUsages_();
-  const bal = computeBalanceMap_(settings, roster, grants, usages)[user.id];
+  const res = myDataBlock_(user, settings, roster, grants, usages);
+  res.user = publicUser_(user);
+  res.settings = publicSettings_(settings);
+  if (user.role !== ROLE_TEACHER) {
+    res.grantTargets = roster
+      .filter(function (m) { return m.status === MEMBER_ACTIVE; })
+      .map(function (m) { return { id: m.id, name: m.name, role: m.role }; });
+  }
+  if (user.role === ROLE_ADMIN) {
+    res.admin = adminDataBlock_(settings, roster, grants, usages);
+  }
+  return res;
+}
 
+/** 本人に関するデータ一式(残時間・履歴・承認待ちなど) */
+function myDataBlock_(user, settings, roster, grants, usages) {
+  const balMap = computeBalanceMap_(settings, roster, grants, usages);
   const myGrants = grants.filter(function (g) { return g.targetId === user.id; });
   const myUsages = usages.filter(function (u) { return u.memberId === user.id; });
 
@@ -26,10 +49,10 @@ function apiGetMyPage(token) {
     .sort(function (a, b) { return a.requestedAt < b.requestedAt ? 1 : -1; })
     .slice(0, 10);
 
-  const res = {
-    user: publicUser_(user),
-    settings: publicSettings_(settings),
-    balance: bal,
+  const block = {
+    balance: balMap[user.id],
+    myGrants: myGrants,
+    myUsages: myUsages,
     pendingMine: {
       grants: myGrants.filter(function (g) { return g.status === STATUS.PENDING; }),
       usages: myUsages.filter(function (u) { return u.status === STATUS.PENDING; }),
@@ -38,32 +61,45 @@ function apiGetMyPage(token) {
   };
   if (user.role !== ROLE_TEACHER) {
     // 自分が起案して承認待ちになっている付与(取下げ用)
-    res.proposedPending = grants.filter(function (g) {
+    block.proposedPending = grants.filter(function (g) {
       return g.proposerId === user.id && g.status === STATUS.PENDING && g.targetId !== user.id;
     });
   }
   if (user.role === ROLE_ADMIN) {
-    res.adminPending = {
+    block.adminPending = {
       grants: grants.filter(function (g) { return g.status === STATUS.PENDING; }).length,
       usages: usages.filter(function (u) { return u.status === STATUS.PENDING; }).length,
     };
   }
-  return res;
+  return block;
 }
 
-/** 割り振り変更簿・日別一覧用: 自分の全記録 */
+/** 旧バージョンの画面との互換用(現在の画面は apiGetAllData を使う) */
+function apiGetMyPage(token) {
+  const user = requireUser_(token);
+  const settings = getSettings_();
+  const block = myDataBlock_(user, settings, getRoster_(), getGrants_(), getUsages_());
+  return {
+    user: publicUser_(user),
+    settings: publicSettings_(settings),
+    balance: block.balance,
+    pendingMine: block.pendingMine,
+    recent: block.recent,
+    proposedPending: block.proposedPending,
+    adminPending: block.adminPending,
+  };
+}
+
+/** 旧バージョンの画面との互換用(現在の画面は apiGetAllData を使う) */
 function apiGetMyRecords(token) {
   const user = requireUser_(token);
   const settings = getSettings_();
-  const roster = getRoster_();
-  const grants = getGrants_();
-  const usages = getUsages_();
-  const bal = computeBalanceMap_(settings, roster, grants, usages)[user.id];
+  const block = myDataBlock_(user, settings, getRoster_(), getGrants_(), getUsages_());
   return {
     settings: publicSettings_(settings),
-    balance: bal,
-    grants: grants.filter(function (g) { return g.targetId === user.id; }),
-    usages: usages.filter(function (u) { return u.memberId === user.id; }),
+    balance: block.balance,
+    grants: block.myGrants,
+    usages: block.myUsages,
   };
 }
 

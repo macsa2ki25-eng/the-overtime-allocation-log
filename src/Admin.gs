@@ -2,14 +2,8 @@
  * Admin.gs ― 管理職向けAPI(承認・却下・取消・名簿管理・年次更新・設定)
  */
 
-/** 管理ページ用のまとめデータ(全員分の残時間・全履歴・名簿・設定) */
-function apiAdminGetAll(token) {
-  const user = requireUser_(token);
-  requireAdmin_(user);
-  const settings = getSettings_();
-  const roster = getRoster_();
-  const grants = getGrants_();
-  const usages = getUsages_();
+/** 管理ページ用データ(全員分の残時間・全履歴・名簿)を組み立てる */
+function adminDataBlock_(settings, roster, grants, usages) {
   const balMap = computeBalanceMap_(settings, roster, grants, usages);
 
   const overview = roster.map(function (m) {
@@ -32,7 +26,6 @@ function apiAdminGetAll(token) {
   });
 
   return {
-    settings: publicSettings_(settings),
     roster: roster.map(function (m) {
       // PINそのもの(ハッシュ含む)はクライアントへ送らない。設定済みかどうかだけ返す
       return { id: m.id, name: m.name, role: m.role, pinSet: !!m.pin, email: m.email, status: m.status, carryMin: m.carryMin, note: m.note };
@@ -40,6 +33,21 @@ function apiAdminGetAll(token) {
     overview: overview,
     grants: grants,
     usages: usages,
+  };
+}
+
+/** 旧バージョンの画面との互換用(現在の画面は apiGetAllData を使う) */
+function apiAdminGetAll(token) {
+  const user = requireUser_(token);
+  requireAdmin_(user);
+  const settings = getSettings_();
+  const block = adminDataBlock_(settings, getRoster_(), getGrants_(), getUsages_());
+  return {
+    settings: publicSettings_(settings),
+    roster: block.roster,
+    overview: block.overview,
+    grants: block.grants,
+    usages: block.usages,
   };
 }
 

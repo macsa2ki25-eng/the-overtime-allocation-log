@@ -188,6 +188,7 @@
       state.settings = res.settings;
       localStorage.setItem('wfb_token', res.token);
       localStorage.setItem('wfb_member', memberId);
+      apiCache['apiGetAllData'] = { at: Date.now(), data: res }; // ログイン応答に全タブ分が同梱されている
       renderApp();
       switchView('mypage');
     }).catch(function (e) { showError(errMsg(e)); })
@@ -246,7 +247,7 @@
 
   // ---- マイページ ----
   views.mypage = function () {
-    return cachedApi('apiGetMyPage').then(function (res) {
+    return cachedApi('apiGetAllData').then(function (res) {
       state.user = res.user;
       state.settings = res.settings;
       var b = res.balance;
@@ -328,7 +329,7 @@
 
   // ---- 利用申請 ----
   views.usage = function () {
-    return cachedApi('apiGetMyPage').then(function (res) {
+    return cachedApi('apiGetAllData').then(function (res) {
       state.settings = res.settings;
       var b = res.balance;
       var workEnd = toMin(state.settings.workEnd);
@@ -380,7 +381,8 @@
 
   // ---- 付与入力 ----
   views.grant = function () {
-    return cachedApi('apiGetGrantTargets').then(function (targets) {
+    return cachedApi('apiGetAllData').then(function (res) {
+      var targets = res.grantTargets || [];
       var workEnd = toMin(state.settings.workEnd);
       var html = '<div class="card"><h2>付与入力(超過時間の割り振り)</h2>' +
         '<p class="muted">会議等で発生した勤務超過の時間帯を入力してください。勤務時間(' + esc(state.settings.workStart) + '〜' + esc(state.settings.workEnd) + ')の外の部分が、選んだ全員に同じ分数で付与されます。管理職の承認後に確定します。</p>' +
@@ -442,7 +444,7 @@
 
   // ---- 割り振り変更簿(自分) ----
   views.ledger = function () {
-    return cachedApi('apiGetMyRecords').then(function (res) {
+    return cachedApi('apiGetAllData').then(function (res) {
       state.settings = res.settings;
       var b = res.balance;
       var html = '<div class="card"><h2>割り振り変更簿(' + state.settings.nendo + '年度・' + esc(state.user.name) + ')</h2>' +
@@ -454,8 +456,8 @@
         '<p class="muted small" style="margin-top:8px">内訳: 前年度繰越 ' + fmtMin(b.carryStart) + ' のうち残り ' + fmtMin(b.carryRemain) +
         (state.settings.carryExpired ? '(失効済み)' : '') + ' / 今年度分の残り ' + fmtMin(b.currentRemain) + '</p></div>';
 
-      html += '<div class="card"><h2>付与の履歴</h2>' + grantTable(res.grants, false) + '</div>';
-      html += '<div class="card"><h2>利用の履歴</h2>' + usageTable(res.usages, false) + '</div>';
+      html += '<div class="card"><h2>付与の履歴</h2>' + grantTable(res.myGrants, false) + '</div>';
+      html += '<div class="card"><h2>利用の履歴</h2>' + usageTable(res.myUsages, false) + '</div>';
       $id('content').innerHTML = html;
     });
   };
@@ -500,7 +502,7 @@
 
   // ---- 日別一覧(自分) ----
   views.daily = function () {
-    return cachedApi('apiGetMyRecords').then(function (res) {
+    return cachedApi('apiGetAllData').then(function (res) {
       state.settings = res.settings;
       state.myRecords = res;
       $id('content').innerHTML =
@@ -518,8 +520,8 @@
     $id('d-kind-grant').className = 'sub' + (kind === 'grant' ? ' active' : '');
     var res = state.myRecords;
     var items = kind === 'usage'
-      ? res.usages.map(function (u) { return { date: u.date, start: u.start, end: u.end, minutes: u.minutes, status: u.status, label: u.note }; })
-      : res.grants.map(function (g) { return { date: g.date, start: g.start, end: g.end, minutes: g.minutes, status: g.status, label: g.reason }; });
+      ? res.myUsages.map(function (u) { return { date: u.date, start: u.start, end: u.end, minutes: u.minutes, status: u.status, label: u.note }; })
+      : res.myGrants.map(function (g) { return { date: g.date, start: g.start, end: g.end, minutes: g.minutes, status: g.status, label: g.reason }; });
     $id('d-body').innerHTML = dayGroups(items, false);
   }
 
@@ -546,11 +548,12 @@
 
   // ---- 管理(管理職のみ) ----
   views.admin = function () {
-    return cachedApi('apiAdminGetAll').then(function (res) {
-      state.adminData = res;
+    return cachedApi('apiGetAllData').then(function (res) {
       state.settings = res.settings;
-      var pendG = res.grants.filter(function (g) { return g.status === '承認待ち'; }).length;
-      var pendU = res.usages.filter(function (u) { return u.status === '承認待ち'; }).length;
+      // 管理画面の各サブタブは {settings, roster, overview, grants, usages} の形で参照する
+      state.adminData = Object.assign({ settings: res.settings }, res.admin);
+      var pendG = state.adminData.grants.filter(function (g) { return g.status === '承認待ち'; }).length;
+      var pendU = state.adminData.usages.filter(function (u) { return u.status === '承認待ち'; }).length;
       var subs = [
         { id: 'pending', label: '承認待ち(' + (pendG + pendU) + ')' },
         { id: 'summary', label: '全体サマリ' },
@@ -1078,9 +1081,9 @@
   /** ウィザード開始: 最新データを取り直してから始める */
   function ywStart() {
     clearApiCache();
-    api('apiAdminGetAll').then(function (d) {
-      state.adminData = d;
+    cachedApi('apiGetAllData').then(function (d) {
       state.settings = d.settings;
+      state.adminData = Object.assign({ settings: d.settings }, d.admin);
       state.wizard = { task: null, step: 'choose', outs: [], ins: [], result: null };
       renderAdminSubFromCache();
     }).catch(function (e) { showError(errMsg(e)); });
@@ -1261,10 +1264,10 @@
   function boot() {
     if (!state.token) { renderLogin(); return; }
     showBusy(true);
-    gsRaw('apiGetMyPage', [state.token]).then(function (res) {
+    gsRaw('apiGetAllData', [state.token]).then(function (res) {
       state.user = res.user;
       state.settings = res.settings;
-      apiCache['apiGetMyPage'] = { at: Date.now(), data: res }; // 初回表示で取り直さない
+      apiCache['apiGetAllData'] = { at: Date.now(), data: res }; // 全タブ分を読み込み済み
       renderApp();
       switchView('mypage');
     }).catch(function () {

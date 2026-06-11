@@ -315,7 +315,10 @@ function apiLogin(memberId, pin) {
   cache.remove(failKey);
   const token = Utilities.getUuid();
   cache.put('tok_' + token, member.id, SESSION_SECONDS);
-  return { token: token, user: publicUser_(member), settings: publicSettings_(getSettings_()) };
+  // 全タブ分のデータも同梱して返す(ログイン後の画面表示に追加の通信が要らないように)
+  const result = allDataFor_(member);
+  result.token = token;
+  return result;
 }
 
 function apiLogout(token) {
