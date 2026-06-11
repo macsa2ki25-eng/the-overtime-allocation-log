@@ -202,7 +202,6 @@
       { id: 'usage', label: '利用申請' },
     ];
     if (state.user.canGrant) tabs.push({ id: 'grant', label: '付与申請' });
-    tabs.push({ id: 'ledger', label: '割り振り変更簿' });
     tabs.push({ id: 'daily', label: '日別一覧' });
     if (state.user.isAdmin) tabs.push({ id: 'admin', label: '管理' });
     return tabs;
@@ -400,7 +399,11 @@
         '</div></div>' +
         '<div class="preview" id="g-preview"></div>' +
         '<button class="btn" data-act="grant-submit">この内容で起案する</button>' +
-        '</div>';
+        '</div>' +
+        '<details class="box"><summary>これまでの付与の履歴を見る(自分に付与された分)</summary>' +
+        '<p class="muted small" style="margin-top:8px">承認状況・処理結果も確認できます。利用の履歴は「日別一覧」タブで確認してください。</p>' +
+        grantTable(res.myGrants, false) +
+        '</details>';
       $id('content').innerHTML = html;
       updateGrantPreview();
     });
@@ -442,26 +445,7 @@
     }).catch(function (e2) { showError(errMsg(e2)); });
   }
 
-  // ---- 割り振り変更簿(自分) ----
-  views.ledger = function () {
-    return cachedApi('apiGetAllData').then(function (res) {
-      state.settings = res.settings;
-      var b = res.balance;
-      var html = '<div class="card"><h2>割り振り変更簿(' + state.settings.nendo + '年度・' + esc(state.user.name) + ')</h2>' +
-        '<div class="balance-grid">' +
-        balCard('累積超過時間(承認済み付与)', b.grantApproved, false) +
-        balCard('累積利用時間', b.carryUsed + b.currentUsed, false) +
-        balCard('残り利用時間', b.totalRemain, true) +
-        '</div>' +
-        '<p class="muted small" style="margin-top:8px">内訳: 前年度繰越 ' + fmtMin(b.carryStart) + ' のうち残り ' + fmtMin(b.carryRemain) +
-        (state.settings.carryExpired ? '(失効済み)' : '') + ' / 今年度分の残り ' + fmtMin(b.currentRemain) + '</p></div>';
-
-      html += '<div class="card"><h2>付与の履歴</h2>' + grantTable(res.myGrants, false) + '</div>';
-      html += '<div class="card"><h2>利用の履歴</h2>' + usageTable(res.myUsages, false) + '</div>';
-      $id('content').innerHTML = html;
-    });
-  };
-
+  // ---- 付与履歴の表(付与申請タブ内で使用) ----
   function grantTable(grants, showName) {
     if (!grants.length) return '<p class="muted">記録がありません。</p>';
     var rows = grants.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; });
@@ -473,22 +457,6 @@
           '<td>' + esc(g.date) + '</td><td>' + esc(g.start + '〜' + g.end) + '</td><td class="num">' + fmtMin(g.minutes) + '</td>' +
           '<td>' + esc(g.reason) + '</td><td>' + esc(g.proposerName) + '</td><td>' + chip(g.status) + '</td>' +
           '<td class="small muted">' + esc(decideInfo(g)) + '</td></tr>';
-      }).join('') + '</table></div>';
-  }
-
-  function usageTable(usages, showName) {
-    if (!usages.length) return '<p class="muted">記録がありません。</p>';
-    var rows = usages.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; });
-    return '<div class="tbl-wrap"><table class="tbl"><tr>' +
-      (showName ? '<th>教職員</th>' : '') +
-      '<th>取得日</th><th>時間帯</th><th>利用時間</th><th>内訳(繰越/今年度)</th><th>備考</th><th>状態</th><th>処理</th></tr>' +
-      rows.map(function (u) {
-        var breakdown = u.status === '承認済み' || u.status === '取消'
-          ? fmtMin(u.carryUsed) + ' / ' + fmtMin(u.currentUsed) : '-';
-        return '<tr>' + (showName ? '<td>' + esc(u.memberName) + '</td>' : '') +
-          '<td>' + esc(u.date) + '</td><td>' + esc(u.start + '〜' + u.end) + '</td><td class="num">' + fmtMin(u.minutes) + '</td>' +
-          '<td class="num">' + breakdown + '</td><td>' + esc(u.note) + '</td><td>' + chip(u.status) + '</td>' +
-          '<td class="small muted">' + esc(decideInfo(u)) + '</td></tr>';
       }).join('') + '</table></div>';
   }
 
@@ -766,29 +734,59 @@
     }).catch(function (e) { showError(errMsg(e)); });
   }
 
-  // 名簿
+  // ---- 名簿(年度途中の変更用。残り時間・ID・履歴に影響しない操作だけに限定) ----
+  function roleOptions(selected) {
+    return ['教員', '主任', '管理職'].map(function (r) {
+      return '<option' + (selected === r ? ' selected' : '') + '>' + r + '</option>';
+    }).join('');
+  }
+
   adminSubs.roster = function (el, data) {
     var m = state.editingMember;
-    var html = '<div class="card"><h2>名簿管理</h2>' +
-      '<p class="muted small">PINは暗号化して保存され、画面にもスプレッドシートにも表示されません。新規追加時は初期PINが自動発行されます。忘れた人には「PIN初期化」で新しいPINを発行して伝えてください。繰越時間は年次更新で自動計算されます(修正が必要なときはスプレッドシートの「名簿」シートを直接編集してください)。</p>' +
-      '<button class="btn sm" data-act="m-new" style="margin-bottom:10px">+ 新しい教職員を追加</button>';
+    var month = new Date().getMonth() + 1;
+    var html = '<div class="card"><h2>名簿管理(年度途中の変更用)</h2>' +
+      ((month === 3 || month === 4)
+        ? '<div class="card" style="background:#fffbeb;border-color:#fcd34d;margin-bottom:10px"><b>⚠ 3月末〜4月の人事異動は、ここではなく「年次更新」タブで行ってください。</b><br>' +
+          '<span class="muted small">「年次更新をスタート」から進めると、残り時間の繰越と転出・転入が一度に正しく処理されます。</span></div>'
+        : '') +
+      '<p class="muted small">このページでできるのは、残り時間・ID・履歴に<b>影響しない</b>変更だけです(IDと繰越時間はここからは変更できません)。' +
+      '年度初めの人事異動は「年次更新」タブで行ってください。PINは暗号化されており、表示はできません(初期化のみ)。</p>' +
+      '<button class="btn sm" data-act="m-new" style="margin-bottom:10px">+ 教職員を追加(年度途中の着任)</button>';
 
-    if (m) {
-      html += '<div class="card" style="background:#f8fafc">' +
-        '<h3>' + (m.id ? esc(m.id) + ' の編集' : '新規追加') + '</h3>' +
-        '<label class="fld"><span class="cap">氏名</span><input type="text" id="m-name" value="' + esc(m.name || '') + '"></label>' +
-        '<label class="fld"><span class="cap">役職</span><select id="m-role">' +
-        ['教員', '主任', '管理職'].map(function (r) { return '<option' + (m.role === r ? ' selected' : '') + '>' + r + '</option>'; }).join('') +
-        '</select></label>' +
+    if (m && !m.id) {
+      // 新規追加フォーム
+      html += '<div class="card" style="background:#f8fafc"><h3>教職員の追加</h3>' +
+        '<p class="muted small">例: 5月から講師の先生が着任 → ここで追加します。新しいIDが発行され、残り時間は0分から始まります。</p>' +
+        '<label class="fld"><span class="cap">氏名</span><input type="text" id="m-name"></label>' +
+        '<label class="fld"><span class="cap">役職</span><select id="m-role">' + roleOptions('教員') + '</select></label>' +
+        '<label class="fld"><span class="cap">メールアドレス(任意。登録すると通知メールが届く)</span><input type="text" id="m-email"></label>' +
+        '<label class="fld"><span class="cap">備考(任意)</span><input type="text" id="m-note"></label>' +
+        '<p class="muted small">保存すると初期PINが自動発行され、一度だけ表示されます。</p>' +
+        '<button class="btn" data-act="m-add">追加する</button> ' +
+        '<button class="btn secondary" data-act="m-cancel-edit">キャンセル</button></div>';
+    } else if (m) {
+      // 変更パネル: 操作を目的別に分け、危ない操作には警告を付ける
+      html += '<div class="card" style="background:#f8fafc"><h3>' + esc(m.name) + ' さん(' + esc(m.id) + ')の変更</h3>' +
+
+        '<h3>役職・メール・備考の変更</h3>' +
+        '<label class="fld"><span class="cap">役職</span><select id="m-role">' + roleOptions(m.role) + '</select></label>' +
         '<label class="fld"><span class="cap">メールアドレス(任意。登録すると通知メールが届く)</span><input type="text" id="m-email" value="' + esc(m.email || '') + '"></label>' +
-        '<label class="fld"><span class="cap">状態(転出した人は「停止」に)</span><select id="m-status">' +
-        ['在籍', '停止'].map(function (s) { return '<option' + ((m.status || '在籍') === s ? ' selected' : '') + '>' + s + '</option>'; }).join('') +
-        '</select></label>' +
         '<label class="fld"><span class="cap">備考(任意)</span><input type="text" id="m-note" value="' + esc(m.note || '') + '"></label>' +
-        (m.id ? '<p class="muted small">PINを変えたい場合は、一覧の「PIN初期化」を使ってください。</p>' : '<p class="muted small">保存すると初期PINが自動発行され、一度だけ表示されます。</p>') +
-        '<button class="btn" data-act="m-save" data-id="' + esc(m.id || '') + '">保存</button> ' +
-        '<button class="btn secondary" data-act="m-cancel-edit">キャンセル</button>' +
-        '</div>';
+        '<button class="btn sm" data-act="m-contact-save" data-id="' + esc(m.id) + '">この内容で保存</button>' +
+
+        '<h3 style="margin-top:18px">在籍状態(現在: ' + esc(m.status) + ')</h3>' +
+        '<p class="muted small">産休・育休・休職・年度途中の転出は「停止」にします。停止中はログインできなくなるだけで、<b>残り時間と履歴はそのまま保持され</b>、復帰したら「在籍」に戻すだけで元どおり使えます。</p>' +
+        (m.status === '在籍'
+          ? '<button class="btn sm danger" data-act="m-status" data-id="' + esc(m.id) + '" data-name="' + esc(m.name) + '" data-status="停止">停止にする(休職・転出)</button>'
+          : '<button class="btn sm" data-act="m-status" data-id="' + esc(m.id) + '" data-name="' + esc(m.name) + '" data-status="在籍">在籍に戻す(復帰)</button>') +
+
+        '<details class="box" style="margin-top:14px"><summary>氏名の修正(改姓・入力ミスの訂正のみ)</summary>' +
+        '<p class="danger-text small" style="margin:8px 0"><b>別の先生の名前に書き換えないでください。</b>残り時間と履歴がIDに紐づいたまま、その名前の人のものになってしまいます。' +
+        '別の先生が着任した場合は「教職員を追加」、いなくなった先生は「停止」を使ってください。</p>' +
+        '<label class="fld"><span class="cap">新しい氏名(同一人物のみ)</span><input type="text" id="m-newname" value="' + esc(m.name) + '"></label>' +
+        '<button class="btn sm danger" data-act="m-rename" data-id="' + esc(m.id) + '" data-name="' + esc(m.name) + '">氏名を修正する</button></details>' +
+
+        '<div style="margin-top:14px"><button class="btn secondary" data-act="m-cancel-edit">閉じる</button></div></div>';
     }
 
     html += '<div class="tbl-wrap"><table class="tbl">' +
@@ -800,26 +798,59 @@
           ' <button class="btn sm secondary" data-act="m-resetpin" data-id="' + esc(r.id) + '" data-name="' + esc(r.name) + '">初期化</button></td>' +
           '<td>' + esc(r.email || '-') + '</td><td>' + esc(r.status) + '</td>' +
           '<td class="num">' + r.carryMin + '</td><td class="small">' + esc(r.note) + '</td>' +
-          '<td><button class="btn sm secondary" data-act="m-edit" data-id="' + esc(r.id) + '">編集</button></td></tr>';
+          '<td><button class="btn sm secondary" data-act="m-edit" data-id="' + esc(r.id) + '">変更</button></td></tr>';
       }).join('') + '</table></div></div>';
     el.innerHTML = html;
   };
 
-  function saveMember(id) {
-    var payload = {
-      id: id || '',
+  function addMember() {
+    api('apiAdminAddMember', {
       name: $id('m-name').value,
       role: $id('m-role').value,
       email: $id('m-email').value,
-      status: $id('m-status').value,
       note: $id('m-note').value,
-    };
-    api('apiAdminSaveMember', payload).then(function (res) {
-      if (res.initialPin) {
-        alert('登録しました(' + res.id + ')。\n\n初期PIN: ' + res.initialPin + '\n\n本人に伝えてください。この画面を閉じると再表示できません(忘れた場合は「PIN初期化」で再発行できます)。');
-      } else {
-        showInfo('保存しました(' + res.id + ')。');
-      }
+    }).then(function (res) {
+      alert('登録しました(' + res.id + ')。\n\n初期PIN: ' + res.initialPin + '\n\n本人に伝えてください。この画面を閉じると再表示できません(忘れた場合は「PIN初期化」で再発行できます)。');
+      state.editingMember = null;
+      clearApiCache();
+      refreshAdmin();
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  function saveContact(id) {
+    api('apiAdminUpdateContact', {
+      id: id,
+      role: $id('m-role').value,
+      email: $id('m-email').value,
+      note: $id('m-note').value,
+    }).then(function () {
+      showInfo('保存しました。');
+      state.editingMember = null;
+      clearApiCache();
+      refreshAdmin();
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  function setMemberStatus(id, name, status) {
+    var msg = status === '停止'
+      ? name + ' さんを「停止」にします。\n\n・ログインできなくなります\n・残り時間と履歴はそのまま保持されます\n・復帰したら「在籍」に戻すだけで元どおり使えます\n\nよろしいですか?'
+      : name + ' さんを「在籍」に戻します。以前の残り時間と履歴がそのまま使えるようになります。よろしいですか?';
+    if (!confirm(msg)) return;
+    api('apiAdminSetMemberStatus', id, status).then(function (res) {
+      showInfo(res.name + ' さんを「' + res.status + '」にしました。');
+      state.editingMember = null;
+      clearApiCache();
+      refreshAdmin();
+    }).catch(function (e) { showError(errMsg(e)); });
+  }
+
+  function renameMember(id, oldName) {
+    var newName = $id('m-newname').value.trim();
+    if (!newName) { showError('氏名を入力してください。'); return; }
+    if (newName === oldName) { showError('氏名が変わっていません。'); return; }
+    if (!confirm('「' + oldName + '」→「' + newName + '」に修正します。\n\n【確認】同じ人ですか?\n別の先生の名前に書き換えると、残り時間と履歴がその名前の人のものになってしまいます。\n(過去の申請記録の表示名は元の氏名のまま残ります)\n\nよろしいですか?')) return;
+    api('apiAdminRenameMember', id, newName).then(function (res) {
+      showInfo('氏名を「' + res.name + '」に修正しました。');
       state.editingMember = null;
       clearApiCache();
       refreshAdmin();
@@ -1171,7 +1202,10 @@
         break;
       }
       case 'm-cancel-edit': state.editingMember = null; renderAdminSubFromCache(); break;
-      case 'm-save': saveMember(ds.id); break;
+      case 'm-add': addMember(); break;
+      case 'm-contact-save': saveContact(ds.id); break;
+      case 'm-status': setMemberStatus(ds.id, ds.name, ds.status); break;
+      case 'm-rename': renameMember(ds.id, ds.name); break;
       case 'm-resetpin': resetPin(ds.id, ds.name); break;
       case 'yw-start': ywStart(); break;
       case 'yw-cancel':
@@ -1251,6 +1285,7 @@
       name: b.getAttribute('data-name'),
       to: b.getAttribute('data-to'),
       idx: b.getAttribute('data-idx'),
+      status: b.getAttribute('data-status'),
     });
   });
   document.getElementById('app').addEventListener('change', function (ev) {

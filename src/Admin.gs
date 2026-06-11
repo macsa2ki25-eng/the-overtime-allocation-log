@@ -219,10 +219,9 @@ function apiAdminCancel(token, kind, id, force) {
 }
 
 /**
- * 名簿の登録・更新(管理職のみ)。id が空なら新規追加。
- * 新規追加時は初期PINを自動生成し、一度だけ返す(保存されるのはハッシュのみ)。
- * 既存メンバーの編集ではPINを変更しない(変更は本人のPIN変更か apiAdminResetPin で行う)。
- * 繰越時間もここでは変更しない(年次更新で自動計算される)。
+ * 名簿の登録・更新(旧画面との互換用)。
+ * 現在の画面は目的別に分かれた apiAdminAddMember / apiAdminUpdateContact /
+ * apiAdminRenameMember / apiAdminSetMemberStatus を使う。
  */
 function apiAdminSaveMember(token, memberData) {
   const user = requireUser_(token);
@@ -254,6 +253,95 @@ function apiAdminSaveMember(token, memberData) {
     const initialPin = randomPin_();
     appendRows_(SHEET_NAMES.ROSTER, [[id, name, role, hashPin_(id, initialPin), email, status, 0, note]]);
     return { id: id, initialPin: initialPin };
+  });
+}
+
+// ---- 名簿の目的別API ----
+// 名簿画面からは「残り時間・ID・履歴に影響しない操作」だけができるよう、
+// 操作の種類ごとに関数を分けている。ID・繰越時間はどの関数でも変更できない。
+
+/**
+ * 教職員の追加(年度途中の着任用。年度初めの人事異動は年次更新ウィザードで行う)。
+ * 新しいIDと初期PINを自動発行し、PINは一度だけ返す。残り時間は0分から始まる。
+ */
+function apiAdminAddMember(token, memberData) {
+  const user = requireUser_(token);
+  requireAdmin_(user);
+  const data = memberData || {};
+  const name = String(data.name == null ? '' : data.name).trim();
+  if (!name) throw new Error('氏名を入力してください。');
+  const role = String(data.role == null ? '' : data.role).trim();
+  if ([ROLE_ADMIN, ROLE_LEADER, ROLE_TEACHER].indexOf(role) < 0) throw new Error('役職の指定が正しくありません。');
+  const email = String(data.email == null ? '' : data.email).trim();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('メールアドレスの形式が正しくありません。');
+  const note = String(data.note == null ? '' : data.note).trim();
+  return withLock_(function () {
+    const id = nextMemberIds_(1)[0];
+    const initialPin = randomPin_();
+    appendRows_(SHEET_NAMES.ROSTER, [[id, name, role, hashPin_(id, initialPin), email, MEMBER_ACTIVE, 0, note]]);
+    return { id: id, initialPin: initialPin };
+  });
+}
+
+/**
+ * 役職・メールアドレス・備考の変更。氏名・状態・残り時間・IDには影響しない。
+ */
+function apiAdminUpdateContact(token, memberData) {
+  const user = requireUser_(token);
+  requireAdmin_(user);
+  const data = memberData || {};
+  const role = String(data.role == null ? '' : data.role).trim();
+  if ([ROLE_ADMIN, ROLE_LEADER, ROLE_TEACHER].indexOf(role) < 0) throw new Error('役職の指定が正しくありません。');
+  const email = String(data.email == null ? '' : data.email).trim();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('メールアドレスの形式が正しくありません。');
+  const note = String(data.note == null ? '' : data.note).trim();
+  return withLock_(function () {
+    const member = findMember_(String(data.id == null ? '' : data.id).trim());
+    if (!member) throw new Error('対象が見つかりません。');
+    if (member.id === user.id && role !== ROLE_ADMIN) {
+      throw new Error('誤操作防止のため、自分自身の役職は変更できません。別の管理職アカウントから操作してください。');
+    }
+    const sh = sheet_(SHEET_NAMES.ROSTER);
+    sh.getRange(member.rowIndex, ROSTER_COL.role + 1).setValue(role);
+    sh.getRange(member.rowIndex, ROSTER_COL.email + 1).setValue(email);
+    sh.getRange(member.rowIndex, ROSTER_COL.note + 1).setValue(note);
+    return { id: member.id };
+  });
+}
+
+/**
+ * 氏名の修正(改姓・入力ミスの訂正専用)。
+ * 残り時間と履歴はIDに紐づいたまま残るため、「別の人」への書き換えに使ってはいけない
+ * (画面側でも警告する)。過去の申請記録に記録された表示名は変更されない。
+ */
+function apiAdminRenameMember(token, memberId, newName) {
+  const user = requireUser_(token);
+  requireAdmin_(user);
+  const name = String(newName == null ? '' : newName).trim();
+  if (!name) throw new Error('氏名を入力してください。');
+  return withLock_(function () {
+    const member = findMember_(String(memberId == null ? '' : memberId).trim());
+    if (!member) throw new Error('対象が見つかりません。');
+    sheet_(SHEET_NAMES.ROSTER).getRange(member.rowIndex, ROSTER_COL.name + 1).setValue(name);
+    return { id: member.id, oldName: member.name, name: name };
+  });
+}
+
+/**
+ * 在籍状態の切替。産休・育休・休職・年度途中の転出は「停止」に、復帰したら「在籍」に戻す。
+ * 停止中はログインできなくなるだけで、残り時間と履歴はそのまま保持される。
+ */
+function apiAdminSetMemberStatus(token, memberId, status) {
+  const user = requireUser_(token);
+  requireAdmin_(user);
+  const st = String(status == null ? '' : status).trim();
+  if ([MEMBER_ACTIVE, MEMBER_INACTIVE].indexOf(st) < 0) throw new Error('状態の指定が正しくありません。');
+  return withLock_(function () {
+    const member = findMember_(String(memberId == null ? '' : memberId).trim());
+    if (!member) throw new Error('対象が見つかりません。');
+    if (member.id === user.id) throw new Error('誤操作防止のため、自分自身の状態は変更できません。');
+    sheet_(SHEET_NAMES.ROSTER).getRange(member.rowIndex, ROSTER_COL.status + 1).setValue(st);
+    return { id: member.id, name: member.name, status: st };
   });
 }
 
