@@ -344,7 +344,7 @@ function requireUser_(token) {
 }
 
 function requireGranter_(member) {
-  if (member.role === ROLE_TEACHER) throw new Error('付与の入力は管理職・主任のみ行えます。');
+  if (member.role === ROLE_TEACHER) throw new Error('付与の申請は管理職・主任のみ行えます。');
 }
 
 function requireAdmin_(member) {

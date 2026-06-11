@@ -103,7 +103,7 @@ function apiGetMyRecords(token) {
   };
 }
 
-/** 付与入力用: 対象として選べる在籍メンバーの一覧(管理職・主任のみ) */
+/** 付与申請用: 対象として選べる在籍メンバーの一覧(管理職・主任のみ) */
 function apiGetGrantTargets(token) {
   const user = requireUser_(token);
   requireGranter_(user);
