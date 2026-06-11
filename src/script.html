@@ -201,7 +201,7 @@
       { id: 'mypage', label: 'マイページ' },
       { id: 'usage', label: '利用申請' },
     ];
-    if (state.user.canGrant) tabs.push({ id: 'grant', label: '付与入力' });
+    if (state.user.canGrant) tabs.push({ id: 'grant', label: '付与申請' });
     tabs.push({ id: 'ledger', label: '割り振り変更簿' });
     tabs.push({ id: 'daily', label: '日別一覧' });
     if (state.user.isAdmin) tabs.push({ id: 'admin', label: '管理' });
@@ -379,12 +379,12 @@
     }).catch(function (e2) { showError(errMsg(e2)); });
   }
 
-  // ---- 付与入力 ----
+  // ---- 付与申請 ----
   views.grant = function () {
     return cachedApi('apiGetAllData').then(function (res) {
       var targets = res.grantTargets || [];
       var workEnd = toMin(state.settings.workEnd);
-      var html = '<div class="card"><h2>付与入力(超過時間の割り振り)</h2>' +
+      var html = '<div class="card"><h2>付与申請(超過時間の割り振り)</h2>' +
         '<p class="muted">会議等で発生した勤務超過の時間帯を入力してください。勤務時間(' + esc(state.settings.workStart) + '〜' + esc(state.settings.workEnd) + ')の外の部分が、選んだ全員に同じ分数で付与されます。管理職の承認後に確定します。</p>' +
         '<label class="fld"><span class="cap">発生日</span><input type="date" id="g-date" value="' + todayStr() + '" data-watch="preview"></label>' +
         '<label class="fld"><span class="cap">時間帯</span><span class="timerange">' +
