@@ -129,11 +129,14 @@ function apiAdminDecide(token, kind, ids, action, memo) {
     return { settings: settings, roster: roster, done: done, errors: errors, mailJobs: mailJobs };
   });
 
-  // メール送信はロックの外で行う(他の人の操作を待たせないため)
-  out.mailJobs.forEach(function (job) {
-    const member = out.roster.filter(function (m) { return m.id === job.memberId; })[0];
-    notifyMemberResult_(out.settings, member, job.subject, job.lines);
-  });
+  // メールはロックの外でまとめてキューに入れる(他の人の操作を待たせないため)
+  notifyMemberResults_(out.settings, out.mailJobs.map(function (job) {
+    return {
+      member: out.roster.filter(function (m) { return m.id === job.memberId; })[0],
+      subject: job.subject,
+      lines: job.lines,
+    };
+  }));
   return { done: out.done, errors: out.errors };
 }
 
@@ -458,7 +461,8 @@ function apiAdminYearSwitch(token, confirmText, personnel) {
     // 記録のリセットと年度の更新
     clearDataRows_(SHEET_NAMES.GRANT);
     clearDataRows_(SHEET_NAMES.USAGE);
-    clearDataRows_(SHEET_NAMES.LOG);
+    clearDataRowsIfExists_(SHEET_NAMES.LOG);
+    clearDataRowsIfExists_(SHEET_NAMES.QUEUE);
     saveSettingValue_(SETTING_KEYS.nendo, settings.nendo + 1);
     saveSettingValue_(SETTING_KEYS.expireDate, '');
 

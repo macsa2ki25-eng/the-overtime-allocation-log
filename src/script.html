@@ -361,7 +361,37 @@
       esc(state.settings.workStart) + '〜' + esc(state.settings.workEnd) + ')内の部分のみが利用時間になります。</span>';
   }
 
+  /** 申請ボタンの二重押しを防ぐ(送信中は押せないようにする) */
+  var submitting = false;
+  function lockSubmit(act, label) {
+    submitting = true;
+    var btn = document.querySelector('[data-act="' + act + '"]');
+    if (btn) { btn.disabled = true; btn.textContent = '送信中...'; }
+    return function () {
+      submitting = false;
+      var b = document.querySelector('[data-act="' + act + '"]');
+      if (b) { b.disabled = false; b.textContent = label; }
+    };
+  }
+
+  /**
+   * 申請が失敗したときの案内。通信エラーの場合は登録済みの可能性があるため、
+   * 押し直しではなく確認を促す(同じ内容はサーバー側で二重登録を防いでいる)。
+   */
+  function showSubmitError(e) {
+    var msg = errMsg(e);
+    if (msg.indexOf('すでに同じ内容') >= 0) {
+      showInfo(msg); // 二重登録の防止が働いた場合はエラーではなく案内として見せる
+      clearApiCache();
+      switchView('mypage');
+      return;
+    }
+    showError(msg + '\n\n※通信エラーの場合、申請が登録されていることがあります。'
+      + '右上の「更新」を押して確認してください(同じ内容を続けて申請しても二重登録はされません)。');
+  }
+
   function submitUsage() {
+    if (submitting) return;
     var date = $id('u-date').value;
     var start = $id('u-start').value, end = $id('u-end').value;
     var note = $id('u-note').value;
@@ -371,11 +401,12 @@
     var minutes = overlap(s, e, toMin(state.settings.workStart), toMin(state.settings.workEnd));
     if (minutes <= 0) { showError('入力された時間帯に勤務時間が含まれていません。'); return; }
     if (!confirm('利用を申請します。\n\n取得日: ' + date + '\n時間帯: ' + start + '〜' + end + '\n利用時間: ' + fmtMin(minutes) + '\n\nよろしいですか?')) return;
+    var unlock = lockSubmit('usage-submit', 'この内容で申請する');
     api('apiSubmitUsage', { date: date, start: start, end: end, note: note }).then(function (res) {
       clearApiCache();
       showInfo('利用を申請しました(' + fmtMin(res.minutes) + ')。管理職の承認をお待ちください。');
       switchView('mypage');
-    }).catch(function (e2) { showError(errMsg(e2)); });
+    }).catch(showSubmitError).finally(unlock);
   }
 
   // ---- 付与申請 ----
@@ -426,6 +457,7 @@
   }
 
   function submitGrant() {
+    if (submitting) return;
     var date = $id('g-date').value;
     var start = $id('g-start').value, end = $id('g-end').value;
     var reason = $id('g-reason').value.trim();
@@ -438,11 +470,16 @@
     var minutes = (e - s) - overlap(s, e, toMin(state.settings.workStart), toMin(state.settings.workEnd));
     if (minutes <= 0) { showError('入力された時間帯はすべて勤務時間内のため、付与時間が0分になります。'); return; }
     if (!confirm('付与を起案します。\n\n発生日: ' + date + '\n時間帯: ' + start + '〜' + end + '\n付与時間: ' + fmtMin(minutes) + ' × ' + ids.length + '名\n事由: ' + reason + '\n\nよろしいですか?')) return;
+    var unlock = lockSubmit('grant-submit', 'この内容で起案する');
     api('apiSubmitGrant', { date: date, start: start, end: end, reason: reason, teacherIds: ids }).then(function (res) {
       clearApiCache();
-      showInfo('付与を起案しました(' + fmtMin(res.minutes) + ' × ' + res.count + '名)。管理職の承認をお待ちください。');
+      var msg = '付与を起案しました(' + fmtMin(res.minutes) + ' × ' + res.count + '名)。管理職の承認をお待ちください。';
+      if (res.skipped && res.skipped.length) {
+        msg += '\n※' + res.skipped.join('、') + ' さんは同じ内容がすでに登録されていたため、追加していません。';
+      }
+      showInfo(msg);
       switchView('mypage');
-    }).catch(function (e2) { showError(errMsg(e2)); });
+    }).catch(showSubmitError).finally(unlock);
   }
 
   // ---- 付与履歴の表(付与申請タブ内で使用) ----

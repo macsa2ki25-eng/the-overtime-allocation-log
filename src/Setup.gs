@@ -11,7 +11,20 @@ function onOpen() {
     .createMenu('割り振り変更簿')
     .addItem('初期セットアップ(初回のみ)', 'initialSetup')
     .addItem('セットアップ状況の確認', 'checkSetup')
+    .addItem('たまっている通知メールを今すぐ送信', 'sendQueuedMailsNow')
     .addToUi();
+}
+
+/** 通知メールが送られていないときの手動送信(通常は1分ごとに自動で送られる) */
+function sendQueuedMailsNow() {
+  const sent = processMailQueue();
+  let extra = '';
+  try {
+    if (ensureMailTrigger_()) extra = '\n\n自動送信の設定が入っていなかったため、あわせて設定しました。';
+  } catch (e) {
+    extra = '\n\n※自動送信の設定ができませんでした。「初期セットアップ」を実行して権限を許可してください。';
+  }
+  SpreadsheetApp.getUi().alert(sent + ' 件の通知メールを送信しました。' + extra);
 }
 
 function initialSetup() {
@@ -58,8 +71,20 @@ function initialSetup() {
   usageSheet.getRange('A:E').setNumberFormat('@');
   usageSheet.getRange('I:Q').setNumberFormat('@'); // F〜H列(分数・充当)は数値のまま
 
+  // --- 通知キューシート(送信待ちのメール置き場) ---
+  ensureSheet_(ss, SHEET_NAMES.QUEUE, QUEUE_HEADERS);
+
   // --- 通知ログシート ---
   ensureSheet_(ss, SHEET_NAMES.LOG, ['日時', '種別', '宛先', '件名', '結果']);
+
+  // --- メールの自動送信(1分ごと)を設定 ---
+  let mailNote = '';
+  try {
+    ensureMailTrigger_();
+  } catch (e) {
+    mailNote = '\n\n※通知メールの自動送信を設定できませんでした(' + e.message + ')。\n'
+      + 'メニューの「たまっている通知メールを今すぐ送信」から手動で送信できます。';
+  }
 
   // 使われていない初期シート(シート1)が空なら削除する
   ['シート1', 'Sheet1'].forEach(function (name) {
@@ -74,7 +99,7 @@ function initialSetup() {
     '次の手順:\n' +
     '1.「名簿」シートで自分(管理職)の氏名とPINを設定する\n' +
     '2. Apps Script エディタの「デプロイ」→「新しいデプロイ」でウェブアプリとして公開する\n\n' +
-    '詳しくはセットアップ手順書(docs/01_セットアップ手順.md)をご覧ください。'
+    '詳しくはセットアップ手順書(docs/01_セットアップ手順.md)をご覧ください。' + mailNote
   );
 }
 
@@ -95,6 +120,14 @@ function checkSetup() {
     Object.keys(SETTING_KEYS).forEach(function (k) {
       if (!settingsMap[SETTING_KEYS[k]]) problems.push('設定シートに「' + SETTING_KEYS[k] + '」の行がありません');
     });
+    try {
+      const triggers = ScriptApp.getProjectTriggers().filter(function (t) {
+        return t.getHandlerFunction() === MAIL_TRIGGER_HANDLER;
+      });
+      if (!triggers.length) problems.push('通知メールの自動送信が設定されていません(「初期セットアップ」を実行すると設定されます)');
+    } catch (e) {
+      problems.push('通知メールの自動送信を確認できませんでした: ' + e.message);
+    }
   }
   SpreadsheetApp.getUi().alert(
     problems.length

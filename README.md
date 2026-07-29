@@ -38,7 +38,7 @@ Google スプレッドシート + Google Apps Script (GAS) だけで動くため
 Google Apps Script ウェブアプリ  ←─ メール通知(Gmail)
         │
         ▼
-Google スプレッドシート(設定・名簿・付与記録・利用記録・通知ログ)
+Google スプレッドシート(設定・名簿・付与記録・利用記録・通知キュー・通知ログ)
 ```
 
 ## リポジトリ構成

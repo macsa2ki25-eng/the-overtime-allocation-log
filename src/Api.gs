@@ -139,18 +139,36 @@ function apiSubmitGrant(token, payload) {
       throw new Error('入力された時間帯はすべて勤務時間(' + settings.workStart + '〜' + settings.workEnd + ')内のため、付与時間が0分になります。勤務時間外の部分のみが付与の対象です。');
     }
     const roster = getRoster_();
-    const targets = teacherIds.map(function (id) {
+    const requested = teacherIds.map(function (id) {
       const found = roster.filter(function (m) { return m.id === String(id).trim() && m.status === MEMBER_ACTIVE; });
       if (!found.length) throw new Error('選択された教職員(' + id + ')が名簿に見つかりません。');
       return found[0];
     });
-    const groupId = nextIds_(SHEET_NAMES.GRANT, GRANT_COL.group, 'GG', 4, 1)[0];
-    const ids = nextIds_(SHEET_NAMES.GRANT, GRANT_COL.id, 'G', 5, targets.length);
+
+    // 通信エラーで押し直したときの二重登録を防ぐ。同じ内容がすでにあれば登録しない。
+    const rawRows = readRows_(SHEET_NAMES.GRANT);
+    const existing = rawRows.map(grantFromRow_).filter(function (g) { return g.id !== ''; });
+    const slot = { date: date, start: minToTime(start), end: minToTime(end), reason: reason };
+    const skipped = [];
+    const targets = [];
+    requested.forEach(function (t) {
+      const candidate = { date: slot.date, start: slot.start, end: slot.end, reason: reason, targetId: t.id };
+      if (isDuplicateGrant(candidate, existing)) skipped.push(t.name);
+      else targets.push(t);
+    });
+    if (!targets.length) {
+      throw new Error('すでに同じ内容が登録されています(' + date + ' ' + slot.start + '〜' + slot.end + '・' + reason + ')。'
+        + '前回の申請は正しく登録されていますので、あらためて申請する必要はありません。'
+        + '状況は画面右上の「更新」を押すと確認できます。');
+    }
+
+    const groupId = nextIds_(SHEET_NAMES.GRANT, GRANT_COL.group, 'GG', 4, 1, rawRows)[0];
+    const ids = nextIds_(SHEET_NAMES.GRANT, GRANT_COL.id, 'G', 5, targets.length, rawRows);
     const now = nowStr_();
     appendRows_(SHEET_NAMES.GRANT, targets.map(function (t, i) {
-      return [ids[i], groupId, STATUS.PENDING, date, minToTime(start), minToTime(end), minutes, reason, t.id, t.name, user.id, user.name, now, '', '', '', '', ''];
+      return [ids[i], groupId, STATUS.PENDING, date, slot.start, slot.end, minutes, reason, t.id, t.name, user.id, user.name, now, '', '', '', '', ''];
     }));
-    return { groupId: groupId, minutes: minutes, targets: targets, settings: settings };
+    return { groupId: groupId, minutes: minutes, targets: targets, skipped: skipped, settings: settings, roster: roster };
   });
 
   notifyAdminsRequest_(created.settings, user, '承認依頼(付与): ' + reason, [
@@ -161,8 +179,13 @@ function apiSubmitGrant(token, payload) {
     '時間帯: ' + minToTime(start) + '〜' + minToTime(end) + '(1人あたり ' + fmtMinutes(created.minutes) + ')',
     '事由: ' + reason,
     '対象: ' + created.targets.map(function (t) { return t.name; }).join('、') + '(' + created.targets.length + '名)',
-  ]);
-  return { groupId: created.groupId, minutes: created.minutes, count: created.targets.length };
+  ], created.roster);
+  return {
+    groupId: created.groupId,
+    minutes: created.minutes,
+    count: created.targets.length,
+    skipped: created.skipped,
+  };
 }
 
 /**
@@ -187,14 +210,26 @@ function apiSubmitUsage(token, payload) {
     if (minutes <= 0) {
       throw new Error('入力された時間帯に勤務時間(' + settings.workStart + '〜' + settings.workEnd + ')が含まれていません。勤務時間内の部分のみが利用の対象です。');
     }
-    const bal = computeBalanceMap_(settings, getRoster_(), getGrants_(), getUsages_())[user.id];
+    const roster = getRoster_();
+    const rawRows = readRows_(SHEET_NAMES.USAGE);
+    const usages = rawRows.map(usageFromRow_).filter(function (u) { return u.id !== ''; });
+
+    // 通信エラーで押し直したときの二重登録を防ぐ
+    const slot = { date: date, start: minToTime(start), end: minToTime(end) };
+    if (isDuplicateUsage({ date: slot.date, start: slot.start, end: slot.end, memberId: user.id }, usages)) {
+      throw new Error('すでに同じ内容が登録されています(' + date + ' ' + slot.start + '〜' + slot.end + ')。'
+        + '前回の申請は正しく登録されていますので、あらためて申請する必要はありません。'
+        + '状況は画面右上の「更新」を押すと確認できます。');
+    }
+
+    const bal = computeBalanceMap_(settings, roster, getGrants_(), usages)[user.id];
     const available = bal ? bal.available : 0;
     if (minutes > available) {
       throw new Error('残り時間が足りません。現在の利用可能時間(承認待ちの利用分を除く)は ' + fmtMinutes(available) + ' です。');
     }
-    const id = nextIds_(SHEET_NAMES.USAGE, USAGE_COL.id, 'U', 5, 1)[0];
-    appendRows_(SHEET_NAMES.USAGE, [[id, STATUS.PENDING, date, minToTime(start), minToTime(end), minutes, '', '', user.id, user.name, note, nowStr_(), '', '', '', '', '']]);
-    return { id: id, minutes: minutes, settings: settings };
+    const id = nextIds_(SHEET_NAMES.USAGE, USAGE_COL.id, 'U', 5, 1, rawRows)[0];
+    appendRows_(SHEET_NAMES.USAGE, [[id, STATUS.PENDING, date, slot.start, slot.end, minutes, '', '', user.id, user.name, note, nowStr_(), '', '', '', '', '']]);
+    return { id: id, minutes: minutes, settings: settings, roster: roster };
   });
 
   notifyAdminsRequest_(created.settings, user, '承認依頼(利用): ' + user.name, [
@@ -204,7 +239,7 @@ function apiSubmitUsage(token, payload) {
     '取得日: ' + date,
     '時間帯: ' + minToTime(start) + '〜' + minToTime(end) + '(' + fmtMinutes(created.minutes) + ')',
     note ? '備考: ' + note : null,
-  ]);
+  ], created.roster);
   return { id: created.id, minutes: created.minutes };
 }
 

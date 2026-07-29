@@ -62,6 +62,42 @@ function allocateUsage(minutes, carryRemain, currentRemain) {
   return { carry: carry, current: current, ok: current <= currentRemain };
 }
 
+/**
+ * 重複チェックの対象になる状態か。
+ * 却下・取下げ・取消になったものは、同じ内容で出し直せるように対象外とする。
+ * (文字列は Code.gs の STATUS と同じ。ずれていないか balance.test.js で検査している)
+ */
+function isLiveStatus(status) {
+  return status === '承認待ち' || status === '承認済み';
+}
+
+/** 同じ日・同じ時間帯か */
+function isSameSlot(a, b) {
+  return a.date === b.date && a.start === b.start && a.end === b.end;
+}
+
+/**
+ * 同じ内容の付与がすでに登録されているか。
+ * 通信エラーで申請ボタンを押し直したときの二重登録を防ぐために使う。
+ */
+function isDuplicateGrant(candidate, existing) {
+  return existing.some(function (g) {
+    return isLiveStatus(g.status)
+      && g.targetId === candidate.targetId
+      && g.reason === candidate.reason
+      && isSameSlot(g, candidate);
+  });
+}
+
+/** 同じ内容の利用がすでに登録されているか */
+function isDuplicateUsage(candidate, existing) {
+  return existing.some(function (u) {
+    return isLiveStatus(u.status)
+      && u.memberId === candidate.memberId
+      && isSameSlot(u, candidate);
+  });
+}
+
 /** 分数を「1時間30分」のような表記にする(負の値は先頭に-) */
 function fmtMinutes(min) {
   const sign = min < 0 ? '-' : '';
@@ -83,6 +119,10 @@ if (typeof module !== 'undefined') {
     calcUsageMinutes: calcUsageMinutes,
     validateTimeRange: validateTimeRange,
     allocateUsage: allocateUsage,
+    isLiveStatus: isLiveStatus,
+    isSameSlot: isSameSlot,
+    isDuplicateGrant: isDuplicateGrant,
+    isDuplicateUsage: isDuplicateUsage,
     fmtMinutes: fmtMinutes,
   };
 }

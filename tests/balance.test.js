@@ -115,4 +115,15 @@ const EXPIRED = { carryExpired: true };
   eq(Object.keys(map), ['A'], '名簿外の記録は無視');
 }
 
+// ---- Logic.gs の状態文字列が Code.gs の STATUS とずれていないこと ----
+// (重複チェックの isLiveStatus は文字列を直接書いているため、定数側の変更を検知する)
+{
+  const L = vm.runInContext('({ isLiveStatus: isLiveStatus })', sandbox);
+  eq(L.isLiveStatus(STATUS.PENDING), true, 'isLiveStatus(STATUS.PENDING)');
+  eq(L.isLiveStatus(STATUS.APPROVED), true, 'isLiveStatus(STATUS.APPROVED)');
+  eq(L.isLiveStatus(STATUS.REJECTED), false, 'isLiveStatus(STATUS.REJECTED)');
+  eq(L.isLiveStatus(STATUS.CANCELED), false, 'isLiveStatus(STATUS.CANCELED)');
+  eq(L.isLiveStatus(STATUS.WITHDRAWN), false, 'isLiveStatus(STATUS.WITHDRAWN)');
+}
+
 console.log('OK: ' + count + ' 件のテストにすべて合格しました');

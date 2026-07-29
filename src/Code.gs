@@ -10,8 +10,17 @@ const SHEET_NAMES = {
   ROSTER: '名簿',
   GRANT: '付与記録',
   USAGE: '利用記録',
+  QUEUE: '通知キュー',
   LOG: '通知ログ',
 };
+
+// メールは申請の処理中には送らず、このシートに貯めて1分ごとに自動送信する
+// (メール送信は1通あたり数秒かかるため、待たせるとタイムアウトの原因になる)。
+const QUEUE_HEADERS = ['登録日時', '種別', '宛先', '件名', '本文', '状態', '処理日時'];
+const QUEUE_COL = { at: 0, type: 1, to: 2, subject: 3, body: 4, status: 5, doneAt: 6 };
+const QUEUE_PENDING = '未送信';
+const QUEUE_SENT = '送信済み';
+const QUEUE_FAILED = '失敗';
 
 const STATUS = {
   PENDING: '承認待ち',
@@ -62,20 +71,44 @@ function include(filename) {
 
 // ---------------------------------------------------------------- 共通ユーティリティ
 
+// GAS のサービス呼び出し(Session/SpreadsheetApp など)は1回ごとに時間がかかるため、
+// 1回の実行中は結果を使い回す。行数が増えても処理時間が伸びないようにするための工夫。
+let TZ_CACHE_ = null;
+let SS_CACHE_ = null;
+let SHEET_CACHE_ = {};
+
 function tz_() {
-  return Session.getScriptTimeZone() || 'Asia/Tokyo';
+  if (!TZ_CACHE_) TZ_CACHE_ = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  return TZ_CACHE_;
 }
 
-/** セルの値(Date または文字列)を "yyyy-MM-dd" に正規化する。解釈できなければ null */
+function ss_() {
+  if (!SS_CACHE_) SS_CACHE_ = SpreadsheetApp.getActiveSpreadsheet();
+  return SS_CACHE_;
+}
+
+function pad2_(n) {
+  return (n < 10 ? '0' : '') + n;
+}
+
+/** 年月日として実在するか(2月30日などを弾く) */
+function isRealDate_(y, mo, d) {
+  const date = new Date(y, mo - 1, d);
+  return date.getFullYear() === y && date.getMonth() === mo - 1 && date.getDate() === d;
+}
+
+/**
+ * セルの値(Date または文字列)を "yyyy-MM-dd" に正規化する。解釈できなければ null。
+ * すでに "yyyy-MM-dd" 形式の文字列ならそのまま返す(GASのサービス呼び出しを避けるため)。
+ */
 function normDateStr_(v) {
   if (v instanceof Date) return Utilities.formatDate(v, tz_(), 'yyyy-MM-dd');
-  const s = String(v == null ? '' : v).trim().replace(/[\/.]/g, '-');
-  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const s = String(v == null ? '' : v).trim();
+  const m = (s.indexOf('-') >= 0 ? s : s.replace(/[\/.]/g, '-')).match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
   if (!m) return null;
   const y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
-  const date = new Date(y, mo - 1, d);
-  if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) return null;
-  return Utilities.formatDate(date, tz_(), 'yyyy-MM-dd');
+  if (!isRealDate_(y, mo, d)) return null;
+  return y + '-' + pad2_(mo) + '-' + pad2_(d);
 }
 
 /** セルの値(Date または文字列)を "H:MM" に正規化する。解釈できなければ null */
@@ -100,10 +133,25 @@ function todayStr_() {
 }
 
 function sheet_(name) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  if (SHEET_CACHE_[name]) return SHEET_CACHE_[name];
+  const sh = ss_().getSheetByName(name);
   if (!sh) {
     throw new Error('シート「' + name + '」が見つかりません。スプレッドシートのメニュー「割り振り変更簿」→「初期セットアップ」を実行してください。');
   }
+  SHEET_CACHE_[name] = sh;
+  return sh;
+}
+
+/** シートが無ければ作って返す(実行中に不足しても止まらないようにするため) */
+function getOrCreateSheet_(name, headers) {
+  if (SHEET_CACHE_[name]) return SHEET_CACHE_[name];
+  let sh = ss_().getSheetByName(name);
+  if (!sh) {
+    sh = ss_().insertSheet(name);
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  SHEET_CACHE_[name] = sh;
   return sh;
 }
 
@@ -140,12 +188,20 @@ function appendRows_(sheetName, rows) {
   sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
 }
 
-/** 指定行の複数セルを更新する。pairs は {列番号(0始まり): 値} */
+/**
+ * 指定行の複数セルを更新する。pairs は {列番号(0始まり): 値}。
+ * セルを1つずつ書くと遅いので、まとめて1回の読み書きで済ませる。
+ */
 function updateCells_(sheetName, rowIndex, pairs) {
   const sh = sheet_(sheetName);
-  Object.keys(pairs).forEach(function (k) {
-    sh.getRange(rowIndex, parseInt(k, 10) + 1).setValue(pairs[k]);
-  });
+  const keys = Object.keys(pairs).map(function (k) { return parseInt(k, 10); });
+  if (!keys.length) return;
+  const min = Math.min.apply(null, keys);
+  const max = Math.max.apply(null, keys);
+  const range = sh.getRange(rowIndex, min + 1, 1, max - min + 1);
+  const values = range.getValues()[0];
+  keys.forEach(function (k) { values[k - min] = pairs[k]; });
+  range.setValues([values]);
 }
 
 /** データ行をすべて消す(ヘッダー行と書式は残す) */
@@ -155,12 +211,22 @@ function clearDataRows_(sheetName) {
   if (last > 1) sh.getRange(2, 1, last - 1, sh.getLastColumn()).clearContent();
 }
 
+/** データ行を消す。シートが無い場合は何もしない(古い設置でも止まらないように) */
+function clearDataRowsIfExists_(sheetName) {
+  try {
+    clearDataRows_(sheetName);
+  } catch (e) {
+    // シートが無いだけなので処理は続ける
+  }
+}
+
 /**
  * 連番IDを発行する。例: nextIds_('利用記録', 0, 'U', 5, 2) → ['U00001', 'U00002']
+ * rows に読み込み済みの行を渡すと、シートの再読み込みを省ける。
  * 必ず withLock_ の中から呼ぶこと。
  */
-function nextIds_(sheetName, colIndex, prefix, padLen, count) {
-  const rows = readRows_(sheetName);
+function nextIds_(sheetName, colIndex, prefix, padLen, count, rows) {
+  rows = rows || readRows_(sheetName);
   const re = new RegExp('^' + prefix + '(\\d+)$');
   let max = 0;
   rows.forEach(function (r) {

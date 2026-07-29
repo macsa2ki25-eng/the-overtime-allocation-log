@@ -76,6 +76,47 @@ eq(L.allocateUsage(30, -10, 40), { carry: 0, current: 30, ok: true }, 'allocate 
 eq(L.allocateUsage(90, 60, 30).ok, true, 'allocate ちょうど');
 eq(L.allocateUsage(95, 60, 30).ok, false, 'allocate 5分超過');
 
+// ---- 重複チェック(通信エラーで申請を押し直したときの二重登録防止) ----
+const G = function (targetId, date, start, end, reason, status) {
+  return { targetId: targetId, date: date, start: start, end: end, reason: reason, status: status };
+};
+const existingGrants = [
+  G('T001', '2026-07-29', '17:00', '17:30', '職員会議', '承認待ち'),
+  G('T002', '2026-07-29', '17:00', '17:30', '職員会議', '承認済み'),
+  G('T003', '2026-07-29', '17:00', '17:30', '職員会議', '却下'),
+  G('T004', '2026-07-29', '17:00', '17:30', '職員会議', '取消'),
+  G('T005', '2026-07-29', '17:00', '17:30', '職員会議', '取下げ'),
+];
+const cand = function (targetId, over) {
+  return Object.assign({ targetId: targetId, date: '2026-07-29', start: '17:00', end: '17:30', reason: '職員会議' }, over || {});
+};
+// 承認待ち・承認済みは二重登録を防ぐ
+eq(L.isDuplicateGrant(cand('T001'), existingGrants), true, '重複(承認待ち)');
+eq(L.isDuplicateGrant(cand('T002'), existingGrants), true, '重複(承認済み)');
+// 却下・取消・取下げは出し直せる
+eq(L.isDuplicateGrant(cand('T003'), existingGrants), false, '却下済みは再申請できる');
+eq(L.isDuplicateGrant(cand('T004'), existingGrants), false, '取消済みは再申請できる');
+eq(L.isDuplicateGrant(cand('T005'), existingGrants), false, '取下げ済みは再申請できる');
+// 対象者・日付・時刻・事由のどれかが違えば別の申請
+eq(L.isDuplicateGrant(cand('T009'), existingGrants), false, '別の教職員は重複でない');
+eq(L.isDuplicateGrant(cand('T001', { date: '2026-07-30' }), existingGrants), false, '別の日は重複でない');
+eq(L.isDuplicateGrant(cand('T001', { start: '17:05' }), existingGrants), false, '別の開始時刻は重複でない');
+eq(L.isDuplicateGrant(cand('T001', { end: '18:00' }), existingGrants), false, '別の終了時刻は重複でない');
+eq(L.isDuplicateGrant(cand('T001', { reason: '学年会' }), existingGrants), false, '別の事由は重複でない');
+eq(L.isDuplicateGrant(cand('T001'), []), false, '記録が無ければ重複でない');
+
+const existingUsages = [
+  { memberId: 'T001', date: '2026-07-29', start: '16:30', end: '17:00', status: '承認待ち' },
+  { memberId: 'T002', date: '2026-07-29', start: '16:30', end: '17:00', status: '却下' },
+];
+eq(L.isDuplicateUsage({ memberId: 'T001', date: '2026-07-29', start: '16:30', end: '17:00' }, existingUsages), true, '利用の重複');
+eq(L.isDuplicateUsage({ memberId: 'T002', date: '2026-07-29', start: '16:30', end: '17:00' }, existingUsages), false, '却下済みの利用は再申請できる');
+eq(L.isDuplicateUsage({ memberId: 'T001', date: '2026-07-29', start: '16:00', end: '16:30' }, existingUsages), false, '別の時間帯は重複でない');
+
+eq(L.isLiveStatus('承認待ち'), true, 'isLiveStatus(承認待ち)');
+eq(L.isLiveStatus('承認済み'), true, 'isLiveStatus(承認済み)');
+eq(L.isLiveStatus('却下'), false, 'isLiveStatus(却下)');
+
 // ---- 表記 ----
 eq(L.fmtMinutes(90), '1時間30分', 'fmtMinutes(90)');
 eq(L.fmtMinutes(60), '1時間', 'fmtMinutes(60)');
