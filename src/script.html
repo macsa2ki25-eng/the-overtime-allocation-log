@@ -588,11 +588,30 @@
 
   var adminSubs = {};
 
-  // 承認待ち
+  // 承認待ち(チェックボックスで複数まとめて処理できる)
+  function pendCheckbox(kind, id, groupId) {
+    return '<input type="checkbox" class="pend-check" data-watch="pend-count" data-pkind="' + kind + '"' +
+      ' value="' + esc(id) + '" data-group="' + esc(groupId || '') + '">';
+  }
+
   adminSubs.pending = function (el, data) {
-    var html = '';
     var pendingGrants = data.grants.filter(function (g) { return g.status === '承認待ち'; });
     var pendingUsages = data.usages.filter(function (u) { return u.status === '承認待ち'; });
+    var total = pendingGrants.length + pendingUsages.length;
+
+    var html = '<div class="card bulk-bar">' +
+      '<div><b>承認待ち ' + total + '件</b>(付与 ' + pendingGrants.length + ' / 利用 ' + pendingUsages.length + ')</div>' +
+      (total
+        ? '<div class="bulk-actions">' +
+          '<button class="btn sm secondary" data-act="pend-all">すべてにチェック / 解除</button>' +
+          '<span id="pend-count" class="muted small">0件を選択中</span>' +
+          '<button class="btn" data-act="pend-bulk" data-action="approve">チェックした申請をまとめて承認</button>' +
+          '<button class="btn danger" data-act="pend-bulk" data-action="reject">まとめて却下</button>' +
+          '</div>' +
+          '<p class="muted small" style="margin-top:6px">付与と利用をまたいでまとめて処理できます。' +
+          '同じ人の「付与」と、その分を使う「利用」を一度にチェックしても、付与が先に処理されるので正しく承認されます。</p>'
+        : '') +
+      '</div>';
 
     html += '<div class="card"><h2>付与の承認待ち(' + pendingGrants.length + '件)</h2>';
     if (!pendingGrants.length) {
@@ -609,13 +628,14 @@
         var head = rows[0];
         var allIds = rows.map(function (r) { return r.id; }).join(',');
         return '<div class="pend-group"><div class="pg-head">' +
-          '<b>' + esc(head.date) + ' ' + esc(head.start + '〜' + head.end) + '</b>(1人あたり ' + fmtMin(head.minutes) + ')<br>' +
-          '<span class="muted small">事由: ' + esc(head.reason) + ' / 起案: ' + esc(head.proposerName) + ' ' + esc(head.requestedAt) + '</span>' +
-          '<div style="margin-top:6px"><button class="btn sm" data-act="decide" data-kind="grant" data-ids="' + esc(allIds) + '" data-action="approve">全員を承認</button> ' +
+          '<label class="pend-grouplabel"><input type="checkbox" class="pend-groupcheck" data-watch="pend-group" data-group="' + esc(gid) + '"> ' +
+          '<b>' + esc(head.date) + ' ' + esc(head.start + '〜' + head.end) + '</b>(1人あたり ' + fmtMin(head.minutes) + '・' + rows.length + '名)</label>' +
+          '<div class="muted small">事由: ' + esc(head.reason) + ' / 起案: ' + esc(head.proposerName) + ' ' + esc(head.requestedAt) + '</div>' +
+          '<div style="margin-top:6px"><button class="btn sm" data-act="decide" data-kind="grant" data-ids="' + esc(allIds) + '" data-action="approve">この会議の全員を承認</button> ' +
           '<button class="btn sm danger" data-act="decide" data-kind="grant" data-ids="' + esc(allIds) + '" data-action="reject">全員を却下</button></div>' +
           '</div><div class="pg-body">' +
           rows.map(function (r) {
-            return '<div class="pend-row"><span>' + esc(r.targetName) + ' さん</span>' +
+            return '<div class="pend-row"><label>' + pendCheckbox('grant', r.id, gid) + ' ' + esc(r.targetName) + ' さん</label>' +
               '<span class="pend-actions">' +
               '<button class="btn sm" data-act="decide" data-kind="grant" data-ids="' + esc(r.id) + '" data-action="approve">承認</button>' +
               '<button class="btn sm danger" data-act="decide" data-kind="grant" data-ids="' + esc(r.id) + '" data-action="reject">却下</button>' +
@@ -632,9 +652,10 @@
       html += pendingUsages.map(function (u) {
         var b = findOverview(data, u.memberId);
         return '<div class="pend-group"><div class="pg-head">' +
-          '<b>' + esc(u.memberName) + ' さん</b> ' + esc(u.date) + ' ' + esc(u.start + '〜' + u.end) + '(' + fmtMin(u.minutes) + ')' +
-          (u.note ? '<br><span class="muted small">備考: ' + esc(u.note) + '</span>' : '') +
-          '<br><span class="muted small">申請: ' + esc(u.requestedAt) + ' / 本人の残り: ' + (b ? fmtMin(b.totalRemain) : '不明') + '</span>' +
+          '<label class="pend-grouplabel">' + pendCheckbox('usage', u.id, '') + ' ' +
+          '<b>' + esc(u.memberName) + ' さん</b> ' + esc(u.date) + ' ' + esc(u.start + '〜' + u.end) + '(' + fmtMin(u.minutes) + ')</label>' +
+          (u.note ? '<div class="muted small">備考: ' + esc(u.note) + '</div>' : '') +
+          '<div class="muted small">申請: ' + esc(u.requestedAt) + ' / 本人の残り: ' + (b ? fmtMin(b.totalRemain) : '不明') + '</div>' +
           '<div style="margin-top:6px"><button class="btn sm" data-act="decide" data-kind="usage" data-ids="' + esc(u.id) + '" data-action="approve">承認</button> ' +
           '<button class="btn sm danger" data-act="decide" data-kind="usage" data-ids="' + esc(u.id) + '" data-action="reject">却下</button></div>' +
           '</div></div>';
@@ -642,26 +663,98 @@
     }
     html += '</div>';
     el.innerHTML = html;
+    updatePendCount();
   };
 
   function findOverview(data, memberId) {
     return data.overview.filter(function (o) { return o.id === memberId; })[0];
   }
 
+  function pendChecks() {
+    return Array.prototype.slice.call(document.querySelectorAll('.pend-check'));
+  }
+
+  /** チェックされている申請を {grantIds, usageIds} にまとめる */
+  function selectedPending() {
+    var sel = { grantIds: [], usageIds: [] };
+    pendChecks().forEach(function (c) {
+      if (!c.checked) return;
+      if (c.getAttribute('data-pkind') === 'grant') sel.grantIds.push(c.value);
+      else sel.usageIds.push(c.value);
+    });
+    return sel;
+  }
+
+  /** 選択件数の表示と、会議ごとのチェックボックスの状態を更新する */
+  function updatePendCount() {
+    var el = $id('pend-count');
+    if (!el) return;
+    var sel = selectedPending();
+    var n = sel.grantIds.length + sel.usageIds.length;
+    el.textContent = n === 0 ? '0件を選択中'
+      : n + '件を選択中(付与 ' + sel.grantIds.length + ' / 利用 ' + sel.usageIds.length + ')';
+    Array.prototype.forEach.call(document.querySelectorAll('.pend-groupcheck'), function (gc) {
+      var kids = pendChecks().filter(function (c) { return c.getAttribute('data-group') === gc.getAttribute('data-group'); });
+      var checked = kids.filter(function (c) { return c.checked; }).length;
+      gc.checked = kids.length > 0 && checked === kids.length;
+      gc.indeterminate = checked > 0 && checked < kids.length;
+    });
+  }
+
+  function toggleAllPending() {
+    var boxes = pendChecks();
+    var allChecked = boxes.length > 0 && boxes.every(function (c) { return c.checked; });
+    boxes.forEach(function (c) { c.checked = !allChecked; });
+    updatePendCount();
+  }
+
+  function toggleGroupPending(groupCheck) {
+    var g = groupCheck.getAttribute('data-group');
+    pendChecks().forEach(function (c) {
+      if (c.getAttribute('data-group') === g) c.checked = groupCheck.checked;
+    });
+    updatePendCount();
+  }
+
+  /** チェックした申請をまとめて承認・却下する */
+  function bulkDecide(action) {
+    var sel = selectedPending();
+    var total = sel.grantIds.length + sel.usageIds.length;
+    if (!total) {
+      showError('処理したい申請にチェックを入れてください(「すべてにチェック」ボタンも使えます)。');
+      return;
+    }
+    var label = 'チェックした ' + total + '件(付与 ' + sel.grantIds.length + ' / 利用 ' + sel.usageIds.length + ')';
+    var memo = '';
+    if (action === 'reject') {
+      var input = prompt(label + ' をまとめて却下します。理由(任意・記録に残ります):', '');
+      if (input === null) return;
+      memo = input;
+    } else if (!confirm(label + ' をまとめて承認します。よろしいですか?')) {
+      return;
+    }
+    sendDecision(sel, action, memo);
+  }
+
   function doDecide(kind, ids, action) {
     var idList = ids.split(',');
+    var sel = kind === 'grant' ? { grantIds: idList, usageIds: [] } : { grantIds: [], usageIds: idList };
     var label = (kind === 'grant' ? '付与' : '利用') + ' ' + idList.length + '件';
     var memo = '';
     if (action === 'reject') {
-      var input = prompt(label + ' を却下します。理由(任意・本人に通知されます):', '');
+      var input = prompt(label + ' を却下します。理由(任意・記録に残ります):', '');
       if (input === null) return;
       memo = input;
-    } else {
-      if (!confirm(label + ' を承認します。よろしいですか?')) return;
+    } else if (!confirm(label + ' を承認します。よろしいですか?')) {
+      return;
     }
-    api('apiAdminDecide', kind, idList, action, memo).then(function (res) {
+    sendDecision(sel, action, memo);
+  }
+
+  function sendDecision(sel, action, memo) {
+    api('apiAdminDecideMany', sel, action, memo).then(function (res) {
       var text = (action === 'approve' ? '承認' : '却下') + ': ' + res.done.length + '件 完了';
-      if (res.errors.length) text += '\n' + res.errors.map(function (e) { return e.message; }).join('\n');
+      if (res.errors.length) text += '\n処理できなかったもの:\n' + res.errors.map(function (e) { return '・' + e.message; }).join('\n');
       (res.errors.length ? showError : showInfo)(text);
       clearApiCache();
       refreshAdmin();
@@ -1165,10 +1258,15 @@
       '<label class="fld"><span class="cap">勤務時間</span><span class="timerange">' +
       timeSelect('s-wstart', s.workStart) + ' 〜 ' + timeSelect('s-wend', s.workEnd) + '</span>' +
       '<span class="muted small">付与は勤務時間の外、利用は勤務時間の中の分数で計算されます。</span></label>' +
-      '<label class="fld"><input type="checkbox" id="s-mail-admins"' + (s.mailToAdmins ? ' checked' : '') + '> 申請があったとき管理職へ承認依頼メールを送る</label>' +
-      '<label class="fld"><input type="checkbox" id="s-mail-members"' + (s.mailToMembers ? ' checked' : '') + '> 承認・却下・取消のとき本人へ結果メールを送る(メール登録者のみ)</label>' +
+      (s.mailFeature
+        ? '<label class="fld"><input type="checkbox" id="s-mail-admins"' + (s.mailToAdmins ? ' checked' : '') + '> 申請があったとき管理職へ承認依頼メールを送る</label>' +
+          '<label class="fld"><input type="checkbox" id="s-mail-members"' + (s.mailToMembers ? ' checked' : '') + '> 承認・却下・取消のとき本人へ結果メールを送る(メール登録者のみ)</label>'
+        : '') +
       '<button class="btn" data-act="s-save">保存</button>' +
-      '<p class="muted small" style="margin-top:10px">メールは、このシステムを設置したGoogleアカウントから送信されます。宛先は名簿のメールアドレス欄で管理します。</p></div>';
+      (s.mailFeature
+        ? '<p class="muted small" style="margin-top:10px">メールは、このシステムを設置したGoogleアカウントから送信されます。宛先は名簿のメールアドレス欄で管理します。</p>'
+        : '<p class="muted small" style="margin-top:10px">メール通知は現在使用していません。承認待ちの申請は「管理」タブの「承認待ち」で確認してください。</p>') +
+      '</div>';
   };
 
   function saveSettings() {
@@ -1176,8 +1274,8 @@
       schoolName: $id('s-school').value,
       workStart: $id('s-wstart').value,
       workEnd: $id('s-wend').value,
-      mailToAdmins: $id('s-mail-admins').checked,
-      mailToMembers: $id('s-mail-members').checked,
+      mailToAdmins: $id('s-mail-admins') ? $id('s-mail-admins').checked : state.settings.mailToAdmins,
+      mailToMembers: $id('s-mail-members') ? $id('s-mail-members').checked : state.settings.mailToMembers,
     }).then(function (res) {
       state.settings = res;
       if (state.adminData) state.adminData.settings = res;
@@ -1230,6 +1328,8 @@
       case 'admin-sub': state.adminSub = ds.sub; renderAdminSubFromCache(); break;
       case 'adaily-kind': renderAdminDaily(ds.kind); break;
       case 'decide': doDecide(ds.kind, ds.ids, ds.action); break;
+      case 'pend-all': toggleAllPending(); break;
+      case 'pend-bulk': bulkDecide(ds.action); break;
       case 'rec-cancel': doCancel(ds.kind, ds.id, false); break;
       case 'm-new': state.editingMember = {}; renderAdminSubFromCache(); break;
       case 'm-edit': {
@@ -1294,10 +1394,14 @@
     renderAdminSub();
   }
 
-  function handleWatch(watch) {
+  function handleWatch(watch, el) {
     if (watch === 'preview') {
       if ($id('u-preview')) updateUsagePreview();
       if ($id('g-preview')) updateGrantPreview();
+    } else if (watch === 'pend-count') {
+      updatePendCount();
+    } else if (watch === 'pend-group') {
+      toggleGroupPending(el);
     } else if (watch === 'records-filter') {
       state.adminFilter = {
         kind: $id('f-kind').value,
@@ -1327,7 +1431,7 @@
   });
   document.getElementById('app').addEventListener('change', function (ev) {
     var t = ev.target.closest('[data-watch]');
-    if (t) handleWatch(t.getAttribute('data-watch'));
+    if (t) handleWatch(t.getAttribute('data-watch'), t);
   });
   document.getElementById('app').addEventListener('keydown', function (ev) {
     if (ev.key === 'Enter' && ev.target.id === 'login-pin') doLogin();

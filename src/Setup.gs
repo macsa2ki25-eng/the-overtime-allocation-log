@@ -7,12 +7,12 @@
  */
 
 function onOpen() {
-  SpreadsheetApp.getUi()
+  const menu = SpreadsheetApp.getUi()
     .createMenu('割り振り変更簿')
     .addItem('初期セットアップ(初回のみ)', 'initialSetup')
-    .addItem('セットアップ状況の確認', 'checkSetup')
-    .addItem('たまっている通知メールを今すぐ送信', 'sendQueuedMailsNow')
-    .addToUi();
+    .addItem('セットアップ状況の確認', 'checkSetup');
+  if (MAIL_ENABLED) menu.addItem('たまっている通知メールを今すぐ送信', 'sendQueuedMailsNow');
+  menu.addToUi();
 }
 
 /** 通知メールが送られていないときの手動送信(通常は1分ごとに自動で送られる) */
@@ -71,19 +71,20 @@ function initialSetup() {
   usageSheet.getRange('A:E').setNumberFormat('@');
   usageSheet.getRange('I:Q').setNumberFormat('@'); // F〜H列(分数・充当)は数値のまま
 
-  // --- 通知キューシート(送信待ちのメール置き場) ---
-  ensureSheet_(ss, SHEET_NAMES.QUEUE, QUEUE_HEADERS);
-
-  // --- 通知ログシート ---
-  ensureSheet_(ss, SHEET_NAMES.LOG, ['日時', '種別', '宛先', '件名', '結果']);
-
-  // --- メールの自動送信(1分ごと)を設定 ---
+  // --- メール通知まわり(MAIL_ENABLED が false の間は用意しない) ---
   let mailNote = '';
-  try {
-    ensureMailTrigger_();
-  } catch (e) {
-    mailNote = '\n\n※通知メールの自動送信を設定できませんでした(' + e.message + ')。\n'
-      + 'メニューの「たまっている通知メールを今すぐ送信」から手動で送信できます。';
+  if (MAIL_ENABLED) {
+    ensureSheet_(ss, SHEET_NAMES.QUEUE, QUEUE_HEADERS);
+    ensureSheet_(ss, SHEET_NAMES.LOG, ['日時', '種別', '宛先', '件名', '結果']);
+    try {
+      ensureMailTrigger_();
+    } catch (e) {
+      mailNote = '\n\n※通知メールの自動送信を設定できませんでした(' + e.message + ')。\n'
+        + 'メニューの「たまっている通知メールを今すぐ送信」から手動で送信できます。';
+    }
+  } else {
+    // 以前に設定した自動送信が残っていれば取り除く
+    try { removeMailTrigger_(); } catch (e) { /* 権限が無い場合は放置してよい */ }
   }
 
   // 使われていない初期シート(シート1)が空なら削除する
@@ -108,6 +109,8 @@ function checkSetup() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const problems = [];
   Object.keys(SHEET_NAMES).forEach(function (k) {
+    // メール通知を使わない間は、通知キュー・通知ログは無くてよい
+    if (!MAIL_ENABLED && (SHEET_NAMES[k] === SHEET_NAMES.QUEUE || SHEET_NAMES[k] === SHEET_NAMES.LOG)) return;
     if (!ss.getSheetByName(SHEET_NAMES[k])) problems.push('シート「' + SHEET_NAMES[k] + '」がありません');
   });
   if (!problems.length) {
@@ -120,13 +123,15 @@ function checkSetup() {
     Object.keys(SETTING_KEYS).forEach(function (k) {
       if (!settingsMap[SETTING_KEYS[k]]) problems.push('設定シートに「' + SETTING_KEYS[k] + '」の行がありません');
     });
-    try {
-      const triggers = ScriptApp.getProjectTriggers().filter(function (t) {
-        return t.getHandlerFunction() === MAIL_TRIGGER_HANDLER;
-      });
-      if (!triggers.length) problems.push('通知メールの自動送信が設定されていません(「初期セットアップ」を実行すると設定されます)');
-    } catch (e) {
-      problems.push('通知メールの自動送信を確認できませんでした: ' + e.message);
+    if (MAIL_ENABLED) {
+      try {
+        const triggers = ScriptApp.getProjectTriggers().filter(function (t) {
+          return t.getHandlerFunction() === MAIL_TRIGGER_HANDLER;
+        });
+        if (!triggers.length) problems.push('通知メールの自動送信が設定されていません(「初期セットアップ」を実行すると設定されます)');
+      } catch (e) {
+        problems.push('通知メールの自動送信を確認できませんでした: ' + e.message);
+      }
     }
   }
   SpreadsheetApp.getUi().alert(

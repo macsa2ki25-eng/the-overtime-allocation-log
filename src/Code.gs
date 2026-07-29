@@ -304,6 +304,7 @@ function publicSettings_(s) {
     workEnd: s.workEnd,
     carryExpired: s.carryExpired,
     expireDate: s.expireDate,
+    mailFeature: MAIL_ENABLED, // メール通知そのものを使うかどうか(Notify.gs の定数)
     mailToAdmins: s.mailToAdmins,
     mailToMembers: s.mailToMembers,
   };

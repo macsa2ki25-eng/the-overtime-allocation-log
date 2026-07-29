@@ -1,13 +1,22 @@
 /**
- * Notify.gs ― メール通知(キュー方式)
+ * Notify.gs ― メール通知(現在は停止中)
  *
- * メール送信は1通あたり数秒かかることがあるため、申請や承認の処理中には送らない。
+ * ■ メール通知は今は使いません(MAIL_ENABLED = false)。
+ *   承認待ちの確認は画面の「管理」タブで行ってください。
+ *
+ * ■ 将来メール通知を使いたくなったときの手順:
+ *   1. 下の MAIL_ENABLED を true に変える
+ *   2. スプレッドシートのメニュー「割り振り変更簿」→「初期セットアップ」を実行
+ *      (通知キューシートの作成と、1分ごとの自動送信の設定が入ります)
+ *   3. 管理画面の「設定」でメール通知のON/OFFを選ぶ
+ *
+ * 仕組み: メール送信は1通あたり数秒かかるため、申請や承認の処理中には送らない。
  * いったん「通知キュー」シートに貯めておき、1分ごとに動く自動処理(processMailQueue)が
- * まとめて送信する。これにより、申請ボタンを押してから画面が返るまでが速くなる。
- *
- * メールはこのスプレッドシートの所有者(=ウェブアプリをデプロイしたアカウント)の
- * Gmail から送信される。送信の成否は「通知ログ」シートに記録される。
+ * まとめて送信する。メールはこのスプレッドシートの所有者(=ウェブアプリをデプロイした
+ * アカウント)の Gmail から送信され、成否は「通知ログ」シートに記録される。
  */
+
+const MAIL_ENABLED = false;
 
 const MAIL_TRIGGER_HANDLER = 'processMailQueue';
 const MAIL_BATCH_LIMIT = 20; // 1回の自動処理で送る上限
@@ -51,7 +60,7 @@ function queueSheet_() {
 
 /** 送信予定のメールをキューに追加する(実際の送信は自動処理が行う) */
 function enqueueMails_(jobs) {
-  if (!jobs.length) return;
+  if (!MAIL_ENABLED || !jobs.length) return;
   try {
     const now = nowStr_();
     const rows = jobs.map(function (j) {
@@ -71,6 +80,7 @@ function enqueueMails_(jobs) {
  * 毎回確認すると遅くなるため、6時間に1回だけ確認する。
  */
 function ensureMailTriggerOccasionally_() {
+  if (!MAIL_ENABLED) return;
   const cache = CacheService.getScriptCache();
   if (cache.get('mailtrig')) return;
   try {
@@ -84,6 +94,7 @@ function ensureMailTriggerOccasionally_() {
 
 /** 自動送信のトリガーを用意する。すでにあれば何もしない */
 function ensureMailTrigger_() {
+  if (!MAIL_ENABLED) return false;
   const triggers = ScriptApp.getProjectTriggers();
   for (let i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === MAIL_TRIGGER_HANDLER) return false;
@@ -92,11 +103,24 @@ function ensureMailTrigger_() {
   return true;
 }
 
+/** メール通知を使わない設定のとき、残っている自動送信の仕掛けを取り除く */
+function removeMailTrigger_() {
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === MAIL_TRIGGER_HANDLER) {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
+  });
+  return removed;
+}
+
 /**
  * キューにたまったメールを送る。1分ごとの自動処理から呼ばれる。
  * 申請や承認の処理(スクリプトロック)を邪魔しないよう、別のロックを使う。
  */
 function processMailQueue() {
+  if (!MAIL_ENABLED) return 0;
   const lock = LockService.getDocumentLock();
   if (!lock.tryLock(3000)) return 0; // 前回の処理が動いていれば今回は見送る
   try {

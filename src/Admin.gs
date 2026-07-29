@@ -52,50 +52,84 @@ function apiAdminGetAll(token) {
 }
 
 /**
- * 承認・却下。ids は付与ID(G〜)または利用ID(U〜)の配列。
+ * 承認・却下(付与・利用をまとめて処理できる)。
+ * selection は { grantIds: [...], usageIds: [...] }。
+ * 付与を先に処理するので、同じ人の「付与の承認 → その分を使う利用の承認」を
+ * 1回のまとめ操作で行える。
  * 利用の承認時は、前年度繰越分から先に充当して内訳を記録する。
  * 一部だけ失敗した場合も処理は続け、{done, errors} で結果を返す。
  */
-function apiAdminDecide(token, kind, ids, action, memo) {
+function apiAdminDecideMany(token, selection, action, memo) {
   const user = requireUser_(token);
   requireAdmin_(user);
-  if (kind !== 'grant' && kind !== 'usage') throw new Error('不正な操作です。');
   if (action !== 'approve' && action !== 'reject') throw new Error('不正な操作です。');
-  const idList = (Array.isArray(ids) ? ids : [ids]).map(String);
-  if (!idList.length) throw new Error('対象を選択してください。');
+  const sel = selection || {};
+  const grantIds = (Array.isArray(sel.grantIds) ? sel.grantIds : []).map(String);
+  const usageIds = (Array.isArray(sel.usageIds) ? sel.usageIds : []).map(String);
+  if (!grantIds.length && !usageIds.length) throw new Error('対象を選択してください。');
   const memoText = String(memo == null ? '' : memo).trim();
+  const approving = action === 'approve';
 
   const out = withLock_(function () {
     const settings = getSettings_();
     const roster = getRoster_();
     const grants = getGrants_();
     const usages = getUsages_();
-    const records = kind === 'grant' ? grants : usages;
-    const sheetName = kind === 'grant' ? SHEET_NAMES.GRANT : SHEET_NAMES.USAGE;
-    const COL = kind === 'grant' ? GRANT_COL : USAGE_COL;
-    const byId = {};
-    records.forEach(function (r) { byId[r.id] = r; });
     const balMap = computeBalanceMap_(settings, roster, grants, usages);
     const now = nowStr_();
     const done = [];
     const errors = [];
     const mailJobs = [];
-    const kindLabel = kind === 'grant' ? '付与' : '利用';
 
-    idList.forEach(function (id) {
-      const rec = byId[id];
+    const finish = function (sheetName, COL, rec, kindLabel, memberId, extraPairs) {
+      const pairs = extraPairs || {};
+      pairs[COL.status] = approving ? STATUS.APPROVED : STATUS.REJECTED;
+      pairs[COL.decidedBy] = user.name;
+      pairs[COL.decidedAt] = now;
+      pairs[COL.decideMemo] = memoText;
+      updateCells_(sheetName, rec.rowIndex, pairs);
+      done.push(rec.id);
+      mailJobs.push({
+        memberId: memberId,
+        subject: kindLabel + 'が' + (approving ? '承認' : '却下') + 'されました(' + rec.date + ')',
+        lines: [
+          'あなたの「' + kindLabel + '」が' + (approving ? '承認' : '却下') + 'されました。',
+          '',
+          '日付: ' + rec.date,
+          '時間帯: ' + rec.start + '〜' + rec.end + '(' + fmtMinutes(rec.minutes) + ')',
+          kindLabel === '付与' ? '事由: ' + rec.reason : (rec.note ? '備考: ' + rec.note : null),
+          '処理者: ' + user.name,
+          memoText ? 'メモ: ' + memoText : null,
+        ],
+      });
+    };
+
+    // --- 付与を先に処理する ---
+    const grantById = {};
+    grants.forEach(function (g) { grantById[g.id] = g; });
+    grantIds.forEach(function (id) {
+      const rec = grantById[id];
       if (!rec) { errors.push({ id: id, message: id + ': 対象が見つかりません。' }); return; }
       if (rec.status !== STATUS.PENDING) { errors.push({ id: id, message: id + ': すでに処理済みです(' + rec.status + ')。' }); return; }
-      const memberId = kind === 'grant' ? rec.targetId : rec.memberId;
-      const memberName = kind === 'grant' ? rec.targetName : rec.memberName;
-      const pairs = {};
+      // 承認した付与分は、続く利用の承認ですぐ使えるようにする
+      if (approving && balMap[rec.targetId]) balMap[rec.targetId].currentRemain += rec.minutes;
+      finish(SHEET_NAMES.GRANT, GRANT_COL, rec, '付与', rec.targetId, null);
+    });
 
-      if (action === 'approve' && kind === 'usage') {
-        const b = balMap[memberId];
-        if (!b) { errors.push({ id: id, message: memberName + ' さんが名簿に見つかりません。' }); return; }
+    // --- 続いて利用を処理する ---
+    const usageById = {};
+    usages.forEach(function (u) { usageById[u.id] = u; });
+    usageIds.forEach(function (id) {
+      const rec = usageById[id];
+      if (!rec) { errors.push({ id: id, message: id + ': 対象が見つかりません。' }); return; }
+      if (rec.status !== STATUS.PENDING) { errors.push({ id: id, message: id + ': すでに処理済みです(' + rec.status + ')。' }); return; }
+      const pairs = {};
+      if (approving) {
+        const b = balMap[rec.memberId];
+        if (!b) { errors.push({ id: id, message: rec.memberName + ' さんが名簿に見つかりません。' }); return; }
         const alloc = allocateUsage(rec.minutes, b.carryRemain, b.currentRemain);
         if (!alloc.ok) {
-          errors.push({ id: id, message: id + ': ' + memberName + ' さんの残時間が不足しています(残り ' + fmtMinutes(b.carryRemain + b.currentRemain) + ')。' });
+          errors.push({ id: id, message: id + ': ' + rec.memberName + ' さんの残時間が不足しています(残り ' + fmtMinutes(b.carryRemain + b.currentRemain) + ')。' });
           return;
         }
         // 同じ呼び出し内で複数件を承認しても整合するよう、残時間を順次減らす
@@ -104,28 +138,9 @@ function apiAdminDecide(token, kind, ids, action, memo) {
         pairs[USAGE_COL.carryUsed] = alloc.carry;
         pairs[USAGE_COL.currentUsed] = alloc.current;
       }
-
-      pairs[COL.status] = action === 'approve' ? STATUS.APPROVED : STATUS.REJECTED;
-      pairs[COL.decidedBy] = user.name;
-      pairs[COL.decidedAt] = now;
-      pairs[COL.decideMemo] = memoText;
-      updateCells_(sheetName, rec.rowIndex, pairs);
-      done.push(id);
-
-      mailJobs.push({
-        memberId: memberId,
-        subject: kindLabel + 'が' + (action === 'approve' ? '承認' : '却下') + 'されました(' + rec.date + ')',
-        lines: [
-          'あなたの「' + kindLabel + '」が' + (action === 'approve' ? '承認' : '却下') + 'されました。',
-          '',
-          '日付: ' + rec.date,
-          '時間帯: ' + rec.start + '〜' + rec.end + '(' + fmtMinutes(rec.minutes) + ')',
-          kind === 'grant' ? '事由: ' + rec.reason : (rec.note ? '備考: ' + rec.note : null),
-          '処理者: ' + user.name,
-          memoText ? 'メモ: ' + memoText : null,
-        ],
-      });
+      finish(SHEET_NAMES.USAGE, USAGE_COL, rec, '利用', rec.memberId, pairs);
     });
+
     return { settings: settings, roster: roster, done: done, errors: errors, mailJobs: mailJobs };
   });
 
@@ -138,6 +153,14 @@ function apiAdminDecide(token, kind, ids, action, memo) {
     };
   }));
   return { done: out.done, errors: out.errors };
+}
+
+/** 承認・却下(旧画面との互換用)。kind は 'grant' か 'usage' */
+function apiAdminDecide(token, kind, ids, action, memo) {
+  if (kind !== 'grant' && kind !== 'usage') throw new Error('不正な操作です。');
+  const idList = (Array.isArray(ids) ? ids : [ids]).map(String);
+  const selection = kind === 'grant' ? { grantIds: idList } : { usageIds: idList };
+  return apiAdminDecideMany(token, selection, action, memo);
 }
 
 /**
