@@ -51,7 +51,7 @@ const ROSTER_COL = { id: 0, name: 1, role: 2, pin: 3, email: 4, status: 5, carry
 const GRANT_COL = { id: 0, group: 1, status: 2, date: 3, start: 4, end: 5, minutes: 6, reason: 7, targetId: 8, targetName: 9, proposerId: 10, proposerName: 11, requestedAt: 12, decidedBy: 13, decidedAt: 14, decideMemo: 15, canceledBy: 16, canceledAt: 17 };
 const USAGE_COL = { id: 0, status: 1, date: 2, start: 3, end: 4, minutes: 5, carryUsed: 6, currentUsed: 7, memberId: 8, memberName: 9, note: 10, requestedAt: 11, decidedBy: 12, decidedAt: 13, decideMemo: 14, canceledBy: 15, canceledAt: 16 };
 
-const SESSION_SECONDS = 6 * 60 * 60; // ログインの有効時間(操作のたびに延長される)
+const SESSION_SECONDS = 12 * 60 * 60; // ログインの有効時間(これを過ぎると再ログインが必要)
 const PIN_FAIL_LIMIT = 5;            // PIN を連続で間違えられる回数
 const PIN_FAIL_LOCK_SECONDS = 300;   // 上限に達したときのロック時間(秒)
 
@@ -380,17 +380,46 @@ function apiLogin(memberId, pin) {
     throw new Error('PINが正しくありません。');
   }
   cache.remove(failKey);
-  const token = Utilities.getUuid();
-  cache.put('tok_' + token, member.id, SESSION_SECONDS);
   // 全タブ分のデータも同梱して返す(ログイン後の画面表示に追加の通信が要らないように)
   const result = allDataFor_(member);
-  result.token = token;
+  result.token = makeToken_(member.id);
   return result;
 }
 
 function apiLogout(token) {
-  CacheService.getScriptCache().remove('tok_' + String(token == null ? '' : token));
+  // ログイン情報はサーバーに保存していないため、利用者の画面から消すだけでよい。
+  // (この合言葉は有効期限が来れば自動的に使えなくなる)
   return true;
+}
+
+/**
+ * ログインの合言葉(トークン)を作る。
+ *
+ * 以前は一時キャッシュ(CacheService)に保存していたが、キャッシュは
+ * いつ消えてもよい仕組みのため「ログイン直後なのに期限切れ」になることがあった。
+ * そこで保存をやめ、「教職員ID・発行時刻・それらから計算した署名」を
+ * 合言葉そのものに含める方式にした。サーバーは署名を計算し直すだけで
+ * 本物かどうか確かめられるので、保存が要らず、消える心配もない。
+ */
+function makeToken_(memberId) {
+  const issued = String(Date.now());
+  return memberId + '.' + issued + '.' + tokenSignature_(memberId, issued);
+}
+
+function tokenSignature_(memberId, issued) {
+  return sha256Hex_(memberId + '.' + issued + '.' + scriptSecret_('SESSION_SECRET'));
+}
+
+/** 合言葉が本物で期限内なら教職員IDを返す。だめなら null */
+function parseToken_(token) {
+  const parts = String(token == null ? '' : token).split('.');
+  if (parts.length !== 3) return null;
+  const memberId = parts[0], issued = parts[1], sig = parts[2];
+  if (!/^T\d+$/.test(memberId) || !/^\d+$/.test(issued)) return null;
+  if (tokenSignature_(memberId, issued) !== sig) return null;
+  const age = Date.now() - parseInt(issued, 10);
+  if (age < 0 || age > SESSION_SECONDS * 1000) return null;
+  return memberId;
 }
 
 /**
@@ -398,15 +427,12 @@ function apiLogout(token) {
  * (クライアントはこの接頭辞を見てログイン画面に戻す)。
  */
 function requireUser_(token) {
-  const t = String(token == null ? '' : token);
-  const cache = CacheService.getScriptCache();
-  const id = t ? cache.get('tok_' + t) : null;
+  const id = parseToken_(token);
   if (!id) throw new Error('AUTH:ログインの有効期限が切れました。もう一度ログインしてください。');
   const member = findMember_(id);
   if (!member || member.status !== MEMBER_ACTIVE) {
     throw new Error('AUTH:アカウントが無効になっています。管理者にご確認ください。');
   }
-  cache.put('tok_' + t, id, SESSION_SECONDS); // 操作のたびに有効期限を延長
   return member;
 }
 
@@ -424,15 +450,33 @@ function requireAdmin_(member) {
 // 名簿シートにPINを平文で直接書いた場合も動作し、次回ログイン成功時に
 // 自動でハッシュへ置き換えられる(復旧用の裏口を兼ねる)。
 
-/** ハッシュ計算用の秘密値。初回利用時に自動生成され、スクリプトプロパティに保存される */
-function pinSecret_() {
+/**
+ * ハッシュ計算用の秘密の値。初回利用時に自動生成され、スクリプトプロパティに保存される。
+ * PIN用(PIN_SECRET)とログイン用(SESSION_SECRET)を別々に持つ。
+ */
+function scriptSecret_(propKey) {
   const props = PropertiesService.getScriptProperties();
-  let secret = props.getProperty('PIN_SECRET');
+  let secret = props.getProperty(propKey);
   if (!secret) {
     secret = Utilities.getUuid() + Utilities.getUuid();
-    props.setProperty('PIN_SECRET', secret);
+    props.setProperty(propKey, secret);
   }
   return secret;
+}
+
+function pinSecret_() {
+  return scriptSecret_('PIN_SECRET');
+}
+
+/** 文字列のSHA-256を16進数の文字列にする */
+function sha256Hex_(text) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8);
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const b = (bytes[i] + 256) % 256; // GASは-128〜127で返すため0〜255に直す
+    hex += (b < 16 ? '0' : '') + b.toString(16);
+  }
+  return hex;
 }
 
 function isHashedPin_(value) {
@@ -440,17 +484,7 @@ function isHashedPin_(value) {
 }
 
 function hashPin_(memberId, pin) {
-  const bytes = Utilities.computeDigest(
-    Utilities.DigestAlgorithm.SHA_256,
-    memberId + ':' + String(pin) + ':' + pinSecret_(),
-    Utilities.Charset.UTF_8
-  );
-  let hex = '';
-  for (let i = 0; i < bytes.length; i++) {
-    const b = (bytes[i] + 256) % 256;
-    hex += (b < 16 ? '0' : '') + b.toString(16);
-  }
-  return '#' + hex;
+  return '#' + sha256Hex_(memberId + ':' + String(pin) + ':' + pinSecret_());
 }
 
 /** 保存形式(ハッシュ/平文)を問わずPINを照合する。平文だった場合は成功時にハッシュへ移行する */
